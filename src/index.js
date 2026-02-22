@@ -5,54 +5,36 @@ import multer from 'multer';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import { WebSocketServer, WebSocket } from 'ws';
-import fs from 'fs/promises';
 import admin from 'firebase-admin';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
-// --- Firebase Admin bootstrap (env -> file) ---
-async function ensureFirebaseCredentialsFile() {
-  const json = process.env.FIREBASE_SERVICE_ACCOUNT_JSON;
-  if (!json) return { ok: false, reason: 'missing FIREBASE_SERVICE_ACCOUNT_JSON' };
-
-  const configuredPath = process.env.GOOGLE_APPLICATION_CREDENTIALS;
-  const preferredPath = configuredPath && configuredPath.trim().length > 0 ? configuredPath : '/tmp/firebase-service-account.json';
-
-  try {
-    const dir = path.dirname(preferredPath);
-    await fs.mkdir(dir, { recursive: true }).catch(() => {});
-    await fs.writeFile(preferredPath, json, { encoding: 'utf8' });
-    process.env.GOOGLE_APPLICATION_CREDENTIALS = preferredPath;
-    return { ok: true, path: preferredPath, fallback: false };
-  } catch (e) {
-    const fallbackPath = '/tmp/firebase-service-account.json';
-    try {
-      await fs.writeFile(fallbackPath, json, { encoding: 'utf8' });
-      process.env.GOOGLE_APPLICATION_CREDENTIALS = fallbackPath;
-      return { ok: true, path: fallbackPath, fallback: true, error: String(e?.message || e) };
-    } catch (e2) {
-      return { ok: false, reason: 'failed to write fallback file', error: String(e2?.message || e2) };
-    }
-  }
-}
-
+// --- Firebase Admin bootstrap (env -> cert) ---
 async function initFirebaseAdmin() {
   if (admin.apps?.length) return { ok: true, already: true };
 
-  const cred = await ensureFirebaseCredentialsFile();
-  if (!cred.ok) {
-    console.error('[Firebase] Credentials not found:', cred.reason);
-    return { ok: false, reason: cred.reason };
+  const json = process.env.FIREBASE_SERVICE_ACCOUNT_JSON;
+  if (!json) {
+    console.error('[Firebase] Missing env FIREBASE_SERVICE_ACCOUNT_JSON');
+    return { ok: false, reason: 'missing FIREBASE_SERVICE_ACCOUNT_JSON' };
+  }
+
+  let serviceAccount;
+  try {
+    serviceAccount = JSON.parse(json);
+  } catch (e) {
+    console.error('[Firebase] FIREBASE_SERVICE_ACCOUNT_JSON is not valid JSON');
+    return { ok: false, reason: 'invalid FIREBASE_SERVICE_ACCOUNT_JSON (not JSON)' };
   }
 
   try {
-    admin.initializeApp({ credential: admin.credential.applicationDefault() });
-    console.log('[Firebase] Admin SDK initialized successfully using:', cred.path);
-    return { ok: true, cred };
+    admin.initializeApp({ credential: admin.credential.cert(serviceAccount) });
+    console.log('[Firebase] Admin SDK initialized successfully (cert from env)');
+    return { ok: true };
   } catch (e) {
     console.error('[Firebase] Initialization error:', e);
-    return { ok: false, reason: String(e?.message || e), cred };
+    return { ok: false, reason: String(e?.message || e) };
   }
 }
 
