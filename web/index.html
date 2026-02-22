@@ -1,0 +1,904 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>AI 翻译助手 - API 联调测试台</title>
+  <style>
+    body { font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial; margin: 16px; color: #111; }
+    .grid { display: grid; grid-template-columns: 1fr; gap: 12px; max-width: 1100px; }
+    @media (min-width: 1000px) { .grid { grid-template-columns: 1fr 1fr; } }
+    .card { border: 1px solid #ddd; border-radius: 10px; padding: 12px; }
+    .row { display: flex; gap: 10px; flex-wrap: wrap; align-items: center; }
+    label { font-size: 12px; color: #333; display: block; margin-bottom: 4px; }
+    input[type="text"], textarea, select { width: 100%; box-sizing: border-box; padding: 8px; border-radius: 8px; border: 1px solid #ccc; }
+    textarea { min-height: 110px; font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New"; }
+    button { padding: 8px 12px; border-radius: 8px; border: 1px solid #ccc; background: #fafafa; cursor: pointer; }
+    button.primary { background: #111; color: #fff; border-color: #111; }
+    button:disabled { opacity: 0.5; cursor: not-allowed; }
+    pre { background: #0b1020; color: #d7e1ff; padding: 10px; border-radius: 10px; overflow: auto; max-height: 320px; white-space: pre-wrap; word-break: break-word; }
+    .muted { color: #666; font-size: 12px; }
+    .kv { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New"; font-size: 12px; }
+  </style>
+</head>
+<body>
+  <h2>AI 翻译助手 - API 联调测试台</h2>
+  <div class="muted">后端代理：同源请求（避免 CORS），Key 通过环境变量注入。支持：翻译（Doubao），ASR（Deepgram/Qwen），TTS（Qwen 非流式 + SSE 流式）。</div>
+
+  <div class="grid">
+    <div class="card">
+      <h3>1) 文本翻译</h3>
+      <div class="row">
+        <div style="flex:1; min-width: 200px;">
+          <label>model</label>
+          <select id="tr_model_select">
+            <option value="doubao-seed-1-6-flash-250828">doubao-seed-1-6-flash-250828</option>
+            <option value="doubao-pro-4k">doubao-pro-4k (示例)</option>
+          </select>
+        </div>
+        <div style="flex:1; min-width: 120px;">
+          <label>source_lang</label>
+          <select id="tr_source">
+            <option value="zh">zh</option>
+            <option value="en">en</option>
+            <option value="ja">ja</option>
+            <option value="ko">ko</option>
+          </select>
+        </div>
+        <div style="flex:1; min-width: 120px;">
+          <label>target_lang</label>
+          <select id="tr_target">
+            <option value="en">en</option>
+            <option value="zh">zh</option>
+            <option value="ja">ja</option>
+            <option value="ko">ko</option>
+          </select>
+        </div>
+        <div style="flex:1; min-width: 120px;">
+          <label>模式</label>
+          <select id="tr_mode">
+            <option value="nonstream">非流式</option>
+            <option value="stream">流式（SSE chunk 直传）</option>
+          </select>
+        </div>
+      </div>
+      <label>text</label>
+      <textarea id="tr_text">你好，世界！今天我们来测试一段稍长的文本翻译，看看流式输出和耗时统计是否正常。</textarea>
+      <div class="row" style="margin-top: 8px;">
+        <button class="primary" id="tr_run">调用翻译</button>
+        <span class="kv" id="tr_model"></span>
+        <span class="kv" id="tr_timing"></span>
+      </div>
+      <h4>结果</h4>
+      <div class="row">
+        <div style="flex:1; min-width: 240px;">
+          <label>原文（发送给模型）</label>
+          <pre id="tr_in"></pre>
+        </div>
+        <div style="flex:1; min-width: 240px;">
+          <label>译文（解析结果）</label>
+          <pre id="tr_result"></pre>
+        </div>
+      </div>
+      <div class="muted" style="margin-top:8px;">Raw（用于排查协议/字段）</div>
+      <pre id="tr_out"></pre>
+    </div>
+
+    <div class="card">
+      <h3>2) ASR 语音识别（最小化）</h3>
+      <div class="muted">录音功能：Chrome/Edge 支持最好。录完会上传到后端（multipart/form-data），后端再转发给 ASR。</div>
+      <div class="row" style="margin-top: 8px;">
+        <button id="rec_start">开始录音</button>
+        <button id="rec_stop" disabled>停止录音</button>
+        <span class="kv" id="rec_status"></span>
+      </div>
+      <audio id="rec_audio" controls style="width:100%; margin-top: 8px;"></audio>
+      <div class="row" style="margin-top: 8px;">
+        <button class="primary" id="rec_send" disabled>发送录音到 ASR</button>
+      </div>
+      <div class="row">
+        <div style="flex:1; min-width: 220px;">
+          <label>model</label>
+          <select id="asr_model">
+            <option value="deepgram">deepgram</option>
+            <option value="qwen3-asr-flash">qwen3-asr-flash</option>
+            <option value="stream_in_stream_out">stream_in_stream_out（预留）</option>
+          </select>
+        </div>
+        <div style="flex:1; min-width: 160px;">
+          <label>language</label>
+          <select id="asr_lang">
+            <option value="zh">zh</option>
+            <option value="en">en</option>
+            <option value="ja">ja</option>
+            <option value="ko">ko</option>
+          </select>
+        </div>
+      </div>
+      <label>audio_url（优先，推荐）</label>
+      <input id="asr_url" type="text" placeholder="https://... 可公开访问音频" />
+      <div class="muted">如用 base64：先把音频转 base64（不含 data: 前缀），粘贴到下面（体积大时浏览器可能卡）。</div>
+      <label>audio_base64</label>
+      <textarea id="asr_b64" placeholder="(optional) base64..." style="min-height: 70px;"></textarea>
+      <div class="muted" style="margin-top:8px;">ASR 建议用更长音频（10-30 秒）测试稳定性；TTS/翻译默认文案已改为更长文本。</div>
+      <div class="row" style="margin-top: 8px;">
+        <label style="display: inline-flex; align-items: center; cursor: pointer;">
+          <input type="checkbox" id="asr_include_raw" style="width: auto; margin-right: 4px;"> 返回 Raw 数据 (调试用)
+        </label>
+      </div>
+      <div class="row" style="margin-top: 8px;">
+        <button class="primary" id="asr_run">调用 ASR</button>
+        <span class="kv" id="asr_model_display"></span>
+        <span class="kv" id="asr_timing"></span>
+      </div>
+      <h4>最终识别结果</h4>
+      <pre id="asr_result"></pre>
+      <div class="muted" style="margin-top:8px;">Raw（用于排查协议/字段）</div>
+      <pre id="asr_out"></pre>
+    </div>
+
+    <div class="card">
+      <h3>3) TTS 语音合成</h3>
+      <div class="row">
+        <div style="flex:1; min-width: 200px;">
+          <label>model</label>
+          <select id="tts_model_select">
+            <option value="qwen3-tts-flash">qwen3-tts-flash</option>
+            <option value="cosyvoice-v1">cosyvoice-v1 (示例)</option>
+          </select>
+        </div>
+        <div style="flex:1; min-width: 120px;">
+          <label>lang</label>
+          <select id="tts_lang">
+            <option value="zh">zh</option>
+            <option value="en">en</option>
+            <option value="ja">ja</option>
+            <option value="ko">ko</option>
+          </select>
+        </div>
+        <div style="flex:1; min-width: 160px;">
+          <label>voice</label>
+          <input id="tts_voice" type="text" value="Cherry" />
+        </div>
+        <div style="flex:1; min-width: 120px;">
+          <label>模式</label>
+          <select id="tts_mode">
+            <option value="nonstream">非流式</option>
+            <option value="stream">流式（SSE）</option>
+          </select>
+        </div>
+      </div>
+      <label>text</label>
+      <textarea id="tts_text">你好，世界！这里是一段稍长的文本，用于测试语音合成的流式输出是否连续、以及整体耗时是否稳定。</textarea>
+      <div class="row" style="margin-top: 8px;">
+        <button class="primary" id="tts_run">调用 TTS</button>
+        <button id="tts_audio_init">初始化音频播放</button>
+        <button id="tts_audio_stop">停止</button>
+        <span class="kv" id="tts_model_display"></span>
+        <span class="kv" id="tts_timing"></span>
+      </div>
+      <h4>流式输出 / Raw</h4>
+      <pre id="tts_out"></pre>
+      <h4>播放（如果能提取出音频 base64）</h4>
+      <audio id="tts_audio" controls></audio>
+      <div class="row" style="margin-top: 8px;">
+        <a id="tts_download" style="display:none; text-decoration:none;">
+          <button class="primary">下载音频</button>
+        </a>
+      </div>
+    </div>
+
+    <div class="card">
+      <h3>4) ASR 实时识别 (qwen3-asr-flash-realtime)</h3>
+      <div class="muted">流式输入+流式输出：开始录音即建立连接，边录边出字。</div>
+      <div class="row" style="margin-top: 8px;">
+        <div style="flex:1; min-width: 160px;">
+          <label>language</label>
+          <select id="rtasr_lang">
+            <option value="zh">zh</option>
+            <option value="en">en</option>
+            <option value="ja">ja</option>
+            <option value="ko">ko</option>
+          </select>
+        </div>
+        <div style="flex:1; min-width: 160px;">
+          <label>VAD 模式</label>
+          <select id="rtasr_vad">
+            <option value="server_vad">开启 (Server VAD)</option>
+            <option value="manual">关闭 (Manual)</option>
+          </select>
+        </div>
+      </div>
+      <div class="row" style="margin-top: 12px;">
+        <button class="primary" id="rtasr_start">开始实时识别</button>
+        <button id="rtasr_stop" disabled>停止</button>
+        <span class="kv" id="rtasr_status"></span>
+      </div>
+      <div class="row" style="margin-top: 12px;">
+        <div style="flex:1;">
+          <label>预览 (text + stash)</label>
+          <div id="rtasr_preview" style="min-height: 2em; padding: 8px; background: #f0f4ff; border-radius: 4px; border-left: 4px solid #3b82f6; font-style: italic; color: #666;"></div>
+        </div>
+      </div>
+      <h4>识别全集</h4>
+      <pre id="rtasr_result" style="min-height: 60px; background: #0b1020; color: #fff;"></pre>
+      <div class="row" style="margin-top: 8px;">
+        <span class="kv" id="rtasr_timing"></span>
+      </div>
+    </div>
+
+    <div class="card">
+      <h3>说明</h3>
+      <div class="muted">
+        1) 流式模式：此测试台直接展示服务端返回的 SSE/chunk 文本，便于你核对供应商的真实协议。<br/>
+        2) 计时：后端会在非流式响应中返回 timing；流式会在最后追加一个 timing 事件（event: timing）。<br/>
+        3) ASR 真流式输入：已预留 model=stream_in_stream_out，后端返回 501，待后续接入支持 WebSocket/分片上传的供应商。
+      </div>
+    </div>
+  </div>
+
+<script>
+  const $ = (id) => document.getElementById(id);
+
+  function setPre(el, text) {
+    el.textContent = text;
+  }
+
+  function fmtTiming(t) {
+    if (!t) return '';
+    const parts = [];
+    if (typeof t.ttfb_ms === 'number') parts.push(`ttfb=${t.ttfb_ms}ms`);
+    if (typeof t.total_ms === 'number') parts.push(`total=${t.total_ms}ms`);
+    return parts.join('  ');
+  }
+
+  async function runJson(endpoint, body) {
+    const r = await fetch(endpoint, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body)
+    });
+    const data = await r.json().catch(() => ({}));
+    return { ok: r.ok, status: r.status, data };
+  }
+
+  async function runStream(endpoint, body, onChunk, onTiming) {
+    const r = await fetch(endpoint, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body)
+    });
+    if (!r.ok) {
+      const txt = await r.text().catch(() => '');
+      throw new Error(`HTTP ${r.status}: ${txt}`);
+    }
+
+    const reader = r.body.getReader();
+    const decoder = new TextDecoder('utf-8');
+    let buf = '';
+
+    while (true) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      buf += decoder.decode(value, { stream: true });
+      onChunk(buf);
+
+      // Try parse timing event if present (very naive)
+      const m = buf.match(/event: timing\s*\ndata: (\{[\s\S]*?\})/);
+      if (m) {
+        try { onTiming(JSON.parse(m[1])); } catch {}
+      }
+      buf = '';
+    }
+  }
+
+  // Model display (for future selection)
+  function updateModelDisplays() {
+    $('asr_model_display').textContent = `model=${$('asr_model').value}`;
+  }
+
+  $('asr_model').addEventListener('change', updateModelDisplays);
+  $('tr_model_select').addEventListener('change', updateModelDisplays);
+  $('tts_model_select').addEventListener('change', updateModelDisplays);
+  updateModelDisplays();
+
+  // Translate
+  $('tr_run').addEventListener('click', async () => {
+    $('tr_run').disabled = true;
+    setPre($('tr_out'), '');
+    setPre($('tr_in'), '');
+    setPre($('tr_result'), '');
+    $('tr_timing').textContent = '';
+
+    const mode = $('tr_mode').value;
+    const body = {
+      model: $('tr_model_select').value,
+      text: $('tr_text').value,
+      source_lang: $('tr_source').value,
+      target_lang: $('tr_target').value,
+      stream: mode === 'stream'
+    };
+
+    try {
+      setPre($('tr_in'), body.text);
+
+      if (mode === 'nonstream') {
+        const { ok, status, data } = await runJson('/api/v1/translate/text', body);
+        setPre($('tr_out'), JSON.stringify({ ok, status, ...data }, null, 2));
+
+        if (ok) {
+          setPre($('tr_result'), data.translation || '');
+        }
+
+        $('tr_timing').textContent = fmtTiming(data.timing);
+      } else {
+        // Stream: parse SSE `data: {...}` lines, and append delta/content gradually.
+        let raw = '';
+        let translated = '';
+        let ttfbSet = false;
+
+        await runStream('/api/v1/translate/text', body, (chunk) => {
+          raw += chunk;
+          setPre($('tr_out'), raw);
+
+          if (!ttfbSet) {
+            $('tr_timing').textContent = 'streaming...';
+            ttfbSet = true;
+          }
+
+          const lines = chunk.split(/\r?\n/);
+          for (const line of lines) {
+            const m = line.match(/^data:\s*(.*)$/);
+            if (!m) continue;
+            const payload = m[1];
+            if (!payload || payload === '[DONE]') continue;
+            try {
+              const obj = JSON.parse(payload);
+              const delta =
+                obj?.choices?.[0]?.delta?.content ??
+                obj?.choices?.[0]?.message?.content ??
+                obj?.choices?.[0]?.text ??
+                '';
+              if (delta) {
+                translated += delta;
+                setPre($('tr_result'), translated);
+              }
+            } catch {
+              // ignore partial JSON
+            }
+          }
+        }, (timing) => {
+          $('tr_timing').textContent = fmtTiming(timing);
+        });
+      }
+    } catch (e) {
+      setPre($('tr_out'), String(e));
+    } finally {
+      $('tr_run').disabled = false;
+    }
+  });
+
+  // Recording (ASR)
+  let recStream = null;
+  let rec = null;
+  let recChunks = [];
+  let recBlob = null;
+
+  function setRecStatus(s) {
+    $('rec_status').textContent = s;
+  }
+
+  async function startRecording() {
+    if (!navigator.mediaDevices?.getUserMedia) {
+      throw new Error('This browser does not support getUserMedia');
+    }
+
+    recStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+
+    const preferred = [
+      'audio/webm;codecs=opus',
+      'audio/webm',
+      'audio/ogg;codecs=opus',
+      'audio/ogg'
+    ];
+    const mimeType = preferred.find((t) => window.MediaRecorder?.isTypeSupported?.(t)) || '';
+
+    recChunks = [];
+    recBlob = null;
+    rec = new MediaRecorder(recStream, mimeType ? { mimeType } : undefined);
+    rec.addEventListener('dataavailable', (e) => {
+      if (e.data && e.data.size > 0) recChunks.push(e.data);
+    });
+
+    const startedAt = performance.now();
+    rec.addEventListener('start', () => {
+      setRecStatus(`recording... mime=${rec.mimeType || 'default'}`);
+    });
+
+    rec.addEventListener('stop', () => {
+      const ms = Math.round(performance.now() - startedAt);
+      recBlob = new Blob(recChunks, { type: rec.mimeType || 'audio/webm' });
+      $('rec_audio').src = URL.createObjectURL(recBlob);
+      $('rec_send').disabled = false;
+      setRecStatus(`recorded ${ms}ms, size=${recBlob.size} bytes`);
+
+      for (const t of recStream.getTracks()) t.stop();
+      recStream = null;
+    });
+
+    rec.start();
+  }
+
+  $('rec_start').addEventListener('click', async () => {
+    $('rec_start').disabled = true;
+    $('rec_stop').disabled = false;
+    $('rec_send').disabled = true;
+    $('rec_audio').removeAttribute('src');
+    setRecStatus('requesting mic...');
+    try {
+      await startRecording();
+    } catch (e) {
+      setRecStatus(`error: ${String(e?.message || e)}`);
+      $('rec_start').disabled = false;
+      $('rec_stop').disabled = true;
+    }
+  });
+
+  $('rec_stop').addEventListener('click', async () => {
+    $('rec_stop').disabled = true;
+    try {
+      rec?.stop();
+    } catch (e) {
+      setRecStatus(`error: ${String(e?.message || e)}`);
+    } finally {
+      $('rec_start').disabled = false;
+    }
+  });
+
+  $('rec_send').addEventListener('click', async () => {
+    $('rec_send').disabled = true;
+    setRecStatus('uploading...');
+
+    if (!recBlob) {
+      setRecStatus('error: no recording');
+      $('rec_send').disabled = false;
+      return;
+    }
+
+    setPre($('asr_out'), '');
+    setPre($('asr_result'), '');
+    $('asr_timing').textContent = '';
+
+    const fd = new FormData();
+    fd.append('model', $('asr_model').value);
+    fd.append('language', $('asr_lang').value);
+    fd.append('audio', recBlob, 'recording.webm');
+
+    try {
+      const r = await fetch('/api/v1/asr', { method: 'POST', body: fd });
+      const data = await r.json().catch(() => ({}));
+      setPre($('asr_out'), JSON.stringify({ ok: r.ok, status: r.status, ...data }, null, 2));
+      if (r.ok) {
+        setPre($('asr_result'), data.text || '');
+      }
+      $('asr_timing').textContent = fmtTiming(data.timing);
+      setRecStatus('uploaded');
+    } catch (e) {
+      setRecStatus(`error: ${String(e?.message || e)}`);
+    } finally {
+      $('rec_send').disabled = false;
+    }
+  });
+
+  // ASR
+  $('asr_run').addEventListener('click', async () => {
+    $('asr_run').disabled = true;
+    setPre($('asr_out'), '');
+    setPre($('asr_result'), '');
+    $('asr_timing').textContent = '';
+
+    const model = $('asr_model').value;
+    const language = $('asr_lang').value;
+    const includeRaw = $('asr_include_raw').checked;
+    
+    const audioUrl = $('asr_url').value.trim();
+    const audioBase64 = $('asr_b64').value.trim();
+
+    try {
+      let data;
+      let ok, status;
+
+      if (!audioUrl && !audioBase64 && recBlob) {
+        // Auto-fallback to recording if input fields are empty
+        setRecStatus('uploading current recording...');
+        const fd = new FormData();
+        fd.append('model', model);
+        fd.append('language', language);
+        fd.append('include_raw', includeRaw);
+        fd.append('audio', recBlob, 'recording.webm');
+
+        const r = await fetch('/api/v1/asr', { method: 'POST', body: fd });
+        data = await r.json().catch(() => ({}));
+        ok = r.ok;
+        status = r.status;
+        setRecStatus('recording uploaded');
+      } else {
+        // Normal JSON request for URL/Base64
+        const body = {
+          model,
+          language,
+          include_raw: includeRaw,
+          audio_url: audioUrl || undefined,
+          audio_base64: audioBase64 || undefined
+        };
+        const res = await runJson('/api/v1/asr', body);
+        data = res.data;
+        ok = res.ok;
+        status = res.status;
+      }
+
+      setPre($('asr_out'), JSON.stringify({ ok, status, ...data }, null, 2));
+      if (ok) {
+        setPre($('asr_result'), data.text || '');
+      }
+      $('asr_timing').textContent = fmtTiming(data.timing);
+    } catch (e) {
+      setPre($('asr_out'), String(e));
+    } finally {
+      $('asr_run').disabled = false;
+    }
+  });
+
+  // TTS (stream PCM player)
+  let ttsAudioCtx = null;
+  let ttsNextStartTime = 0;
+  let ttsActiveSources = [];
+
+  function ensureTtsAudio() {
+    if (!ttsAudioCtx) {
+      ttsAudioCtx = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: 24000 });
+      ttsNextStartTime = ttsAudioCtx.currentTime;
+    }
+    return ttsAudioCtx;
+  }
+
+  async function resumeTtsAudio() {
+    const ctx = ensureTtsAudio();
+    if (ctx.state === 'suspended') await ctx.resume();
+  }
+
+  function stopTtsAudio() {
+    for (const s of ttsActiveSources) {
+      try { s.stop(); } catch {}
+    }
+    ttsActiveSources = [];
+    if (ttsAudioCtx) {
+      ttsNextStartTime = ttsAudioCtx.currentTime;
+    }
+  }
+
+  $('tts_audio_init').addEventListener('click', async () => {
+    try {
+      await resumeTtsAudio();
+      $('tts_timing').textContent = 'audio initialized';
+    } catch (e) {
+      $('tts_timing').textContent = `audio init error: ${String(e?.message || e)}`;
+    }
+  });
+
+  $('tts_audio_stop').addEventListener('click', () => {
+    stopTtsAudio();
+    $('tts_timing').textContent = 'stopped';
+  });
+
+  function base64ToInt16Pcm(b64) {
+    const binary = atob(b64);
+    const bytes = new Uint8Array(binary.length);
+    for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+    return new Int16Array(bytes.buffer);
+  }
+
+  function int16ToFloat32(int16) {
+    const f32 = new Float32Array(int16.length);
+    for (let i = 0; i < int16.length; i++) f32[i] = int16[i] / 32768.0;
+    return f32;
+  }
+
+  function queuePcmToPlay(float32, sampleRate = 24000) {
+    const ctx = ensureTtsAudio();
+    const audioBuffer = ctx.createBuffer(1, float32.length, sampleRate);
+    audioBuffer.copyToChannel(float32, 0);
+
+    const src = ctx.createBufferSource();
+    src.buffer = audioBuffer;
+    src.connect(ctx.destination);
+
+    const now = ctx.currentTime;
+    if (ttsNextStartTime < now) ttsNextStartTime = now;
+    src.start(ttsNextStartTime);
+    ttsNextStartTime += audioBuffer.duration;
+    ttsActiveSources.push(src);
+
+    src.onended = () => {
+      ttsActiveSources = ttsActiveSources.filter((x) => x !== src);
+    };
+  }
+
+  function tryExtractAudioBase64(obj) {
+    // Best-effort: depends on actual DashScope response
+    const candidates = [
+      obj?.output?.audio?.data,
+      obj?.output?.audio?.[0]?.data,
+      obj?.output?.choices?.[0]?.message?.content?.[0]?.audio,
+      obj?.output?.choices?.[0]?.message?.content?.[0]?.audio?.data
+    ];
+    return candidates.find((x) => typeof x === 'string' && x.length > 50);
+  }
+
+  $('tts_run').addEventListener('click', async () => {
+    $('tts_run').disabled = true;
+    setPre($('tts_out'), '');
+    $('tts_timing').textContent = '';
+    $('tts_audio').removeAttribute('src');
+
+    const mode = $('tts_mode').value;
+    const body = {
+      model: $('tts_model_select').value,
+      text: $('tts_text').value,
+      lang: $('tts_lang').value,
+      voice: $('tts_voice').value
+    };
+
+    try {
+      if (mode === 'nonstream') {
+        const { ok, status, data } = await runJson('/api/v1/tts', body);
+        setPre($('tts_out'), JSON.stringify({ ok, status, ...data }, null, 2));
+        $('tts_timing').textContent = fmtTiming(data.timing);
+
+        const dl = $('tts_download');
+        dl.style.display = 'none';
+        
+        const audioUrl = data.audio_url;
+        const audioB64 = data.audio_base64 || tryExtractAudioBase64(data.raw);
+
+        if (audioUrl || audioB64) {
+          const src = audioB64 ? `data:audio/wav;base64,${audioB64}` : `/api/v1/media?url=${encodeURIComponent(audioUrl)}`;
+          $('tts_audio').src = src;
+          $('tts_audio').play().catch(() => {});
+          
+          dl.href = src;
+          dl.download = `tts_${$('tts_lang').value}_${Date.now()}.${data.format || 'wav'}`;
+          dl.style.display = 'inline-block';
+        }
+      } else {
+        let raw = '';
+        let ttfbSet = false;
+
+        stopTtsAudio();
+        ttsNextStartTime = (ttsAudioCtx ? ttsAudioCtx.currentTime : 0);
+
+        const dl = $('tts_download');
+        dl.style.display = 'none';
+
+        let sseBuf = '';
+        let queuedSamplesTotal = 0;
+        let lastQueueUiAt = 0;
+
+        await runStream('/api/v1/tts/stream', body, (chunk) => {
+          raw += chunk;
+          setPre($('tts_out'), raw);
+
+          if (!ttfbSet) {
+            $('tts_timing').textContent = 'streaming...';
+            ttfbSet = true;
+          }
+
+          // Proper SSE framing: events are separated by blank line (\n\n)
+          sseBuf += chunk;
+          const frames = sseBuf.split(/\r?\n\r?\n/);
+          sseBuf = frames.pop() || '';
+
+          for (const frame of frames) {
+            const lines = frame.split(/\r?\n/);
+            for (const line of lines) {
+              const m = line.match(/^data:\s*(.*)$/);
+              if (!m) continue;
+              const payload = m[1];
+              if (!payload || payload === '[DONE]') continue;
+
+              try {
+                const obj = JSON.parse(payload);
+                const base64Data = obj?.output?.audio?.data;
+                const sr = obj?.output?.audio?.sample_rate || 24000;
+                if (!base64Data) continue;
+
+                resumeTtsAudio().catch(() => {});
+
+                // Convert PCM int16 -> float32
+                const int16 = base64ToInt16Pcm(base64Data);
+                const f32 = int16ToFloat32(int16);
+
+                // Schedule with a small lookahead to avoid underruns.
+                const ctx = ensureTtsAudio();
+                const now = ctx.currentTime;
+                const minLead = 0.15; // seconds
+                if (ttsNextStartTime < now + minLead) ttsNextStartTime = now + minLead;
+
+                queuePcmToPlay(f32, sr);
+                queuedSamplesTotal += f32.length;
+
+                const tNow = performance.now();
+                if (tNow - lastQueueUiAt > 150) {
+                  lastQueueUiAt = tNow;
+                  const secs = (queuedSamplesTotal / sr).toFixed(2);
+                  $('tts_timing').textContent = `streaming... queued ~${secs}s @${sr}Hz (sources=${ttsActiveSources.length})`;
+                }
+              } catch {
+                // ignore partial JSON
+              }
+            }
+          }
+        }, (timing) => {
+          $('tts_timing').textContent = fmtTiming(timing);
+        });
+      }
+    } catch (e) {
+      setPre($('tts_out'), String(e));
+    } finally {
+      $('tts_run').disabled = false;
+    }
+  });
+  // --- Real-time ASR (qwen3-asr-flash-realtime) ---
+  let rtasrWs = null;
+  let rtasrAudioCtx = null;
+  let rtasrProcessor = null;
+  let rtasrStream = null;
+  let rtasrStartTime = 0;
+
+  function setRtasrStatus(s) {
+    $('rtasr_status').textContent = s;
+  }
+
+  async function startRtasr() {
+    const lang = $('rtasr_lang').value;
+    const vadMode = $('rtasr_vad').value;
+
+    rtasrWs = new WebSocket(`ws://${location.host}/api/v1/asr/realtime`);
+
+    rtasrWs.onopen = async () => {
+      setRtasrStatus('WS connected, starting mic...');
+      rtasrStartTime = Date.now();
+
+      // 1. Send session.update
+      const sessionUpdate = {
+        event_id: "evt_" + Date.now(),
+        type: "session.update",
+        session: {
+          model: "qwen3-asr-flash-realtime",
+          input_audio_format: "pcm",
+          sample_rate: 16000,
+          input_audio_transcription: { language: lang },
+          turn_detection: vadMode === 'server_vad' ? {
+            type: "server_vad",
+            threshold: 0.0,
+            silence_duration_ms: 400
+          } : null
+        }
+      };
+      rtasrWs.send(JSON.stringify(sessionUpdate));
+
+      // 2. Start Microphone and Resample to 16kHz
+      try {
+        rtasrStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+        rtasrAudioCtx = new (window.AudioContext || window.webkitAudioContext)();
+        const source = rtasrAudioCtx.createMediaStreamSource(rtasrStream);
+        
+        // ScriptProcessor is older but reliable for simple PCM extraction
+        rtasrProcessor = rtasrAudioCtx.createScriptProcessor(4096, 1, 1);
+
+        const resampleRatio = rtasrAudioCtx.sampleRate / 16000;
+        let pcmBuffer = [];
+
+        rtasrProcessor.onaudioprocess = (e) => {
+          if (!rtasrWs || rtasrWs.readyState !== WebSocket.OPEN) return;
+
+          const inputData = e.inputBuffer.getChannelData(0);
+          
+          // Simple downsampling
+          for (let i = 0; i < inputData.length; i += resampleRatio) {
+            // Convert to 16-bit PCM
+            const sample = Math.max(-1, Math.min(1, inputData[Math.floor(i)]));
+            pcmBuffer.push(sample < 0 ? sample * 0x8000 : sample * 0x7FFF);
+          }
+
+          // Send in chunks of ~100ms (1600 samples)
+          if (pcmBuffer.length >= 1600) {
+            const int16Array = new Int16Array(pcmBuffer);
+            const base64 = btoa(String.fromCharCode(...new Uint8Array(int16Array.buffer)));
+            
+            rtasrWs.send(JSON.stringify({
+              event_id: "evt_" + Date.now(),
+              type: "input_audio_buffer.append",
+              audio: base64
+            }));
+            pcmBuffer = [];
+          }
+        };
+
+        source.connect(rtasrProcessor);
+        rtasrProcessor.connect(rtasrAudioCtx.destination);
+        setRtasrStatus('Recording & Recognizing...');
+      } catch (err) {
+        setRtasrStatus('Mic error: ' + err.message);
+        stopRtasr();
+      }
+    };
+
+    rtasrWs.onmessage = (e) => {
+      const msg = JSON.parse(e.data);
+      if (msg.type === 'conversation.item.input_audio_transcription.text') {
+        $('rtasr_preview').textContent = (msg.text || '') + (msg.stash || '');
+      } else if (msg.type === 'conversation.item.input_audio_transcription.completed') {
+        $('rtasr_result').textContent += msg.transcript + '\n';
+        $('rtasr_preview').textContent = '';
+      } else if (msg.type === 'error') {
+        console.error('RT-ASR Error:', msg.error);
+        setRtasrStatus('Error: ' + msg.error.message);
+      } else if (msg.type === 'session.finished') {
+        setRtasrStatus('Session finished');
+        rtasrWs.close();
+      }
+    };
+
+    rtasrWs.onclose = (e) => {
+      console.log('[RT-ASR] WS closed:', e);
+      setRtasrStatus(`Closed (code: ${e.code}, reason: ${e.reason || 'no reason'})`);
+      $('rtasr_start').disabled = false;
+      $('rtasr_stop').disabled = true;
+      stopRtasr(); // Ensure mic is off
+    };
+  }
+
+  function stopRtasr() {
+    if (rtasrWs && rtasrWs.readyState === WebSocket.OPEN) {
+      // If manual mode, commit first
+      if ($('rtasr_vad').value === 'manual') {
+        rtasrWs.send(JSON.stringify({
+          event_id: "evt_" + Date.now(),
+          type: "input_audio_buffer.commit"
+        }));
+      }
+      rtasrWs.send(JSON.stringify({
+        event_id: "evt_" + Date.now(),
+        type: "session.finish"
+      }));
+    }
+
+    if (rtasrProcessor) {
+      rtasrProcessor.disconnect();
+      rtasrProcessor = null;
+    }
+    if (rtasrAudioCtx) {
+      rtasrAudioCtx.close();
+      rtasrAudioCtx = null;
+    }
+    if (rtasrStream) {
+      rtasrStream.getTracks().forEach(t => t.stop());
+      rtasrStream = null;
+    }
+  }
+
+  $('rtasr_start').addEventListener('click', () => {
+    $('rtasr_start').disabled = true;
+    $('rtasr_stop').disabled = false;
+    $('rtasr_result').textContent = '';
+    $('rtasr_preview').textContent = '';
+    startRtasr();
+  });
+
+  $('rtasr_stop').addEventListener('click', () => {
+    stopRtasr();
+  });
+</script>
+</body>
+</html>
