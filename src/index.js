@@ -52,6 +52,7 @@ app.get('/', (req, res) => {
 });
 
 const PORT = process.env.PORT ? Number(process.env.PORT) : 8080;
+const DEFAULT_USAGE_LIMIT_SECONDS = 60 * 60;
 
 function nowMs() {
   return Number(process.hrtime.bigint() / 1000000n);
@@ -96,6 +97,70 @@ async function getUserPlan(uid) {
   return 'free';
 }
 
+function getWsTokenFromReq(req) {
+  try {
+    const u = new URL(req.url, `http://${req.headers.host || 'localhost'}`);
+    const qToken = u.searchParams.get('token');
+    if (qToken) return qToken;
+  } catch {}
+
+  const h = req.headers?.authorization;
+  if (typeof h === 'string') {
+    const m = h.match(/^Bearer\s+(.+)$/i);
+    if (m) return m[1];
+  }
+  return null;
+}
+
+async function verifyUserFromWsReq(req) {
+  const token = getWsTokenFromReq(req);
+  if (!token) throw new Error('missing_token');
+
+  const init = await fbInitPromise;
+  if (!init.ok) throw new Error('firebase_not_ready');
+
+  const decoded = await admin.auth().verifyIdToken(token);
+  return decoded.uid;
+}
+
+async function getUserUsage(uid) {
+  const db = admin.firestore();
+  const ref = db.collection('users').doc(uid);
+  const snap = await ref.get();
+  const data = snap.exists ? (snap.data() || {}) : {};
+
+  const usageSecondsTotal = Number(data.usageSecondsTotal || 0);
+  const usageLimitSeconds = Number(data.usageLimitSeconds || DEFAULT_USAGE_LIMIT_SECONDS);
+  const remainingSeconds = Math.max(0, usageLimitSeconds - usageSecondsTotal);
+
+  return {
+    usageSecondsTotal,
+    usageLimitSeconds,
+    remainingSeconds
+  };
+}
+
+async function addUserUsage(uid, secondsToAdd) {
+  const safeSeconds = Math.max(0, Math.floor(secondsToAdd));
+  if (!safeSeconds) return;
+
+  const db = admin.firestore();
+  const ref = db.collection('users').doc(uid);
+
+  await db.runTransaction(async (tx) => {
+    const snap = await tx.get(ref);
+    const data = snap.exists ? (snap.data() || {}) : {};
+    const usageSecondsTotal = Number(data.usageSecondsTotal || 0);
+    const usageLimitSeconds = Number(data.usageLimitSeconds || DEFAULT_USAGE_LIMIT_SECONDS);
+
+    tx.set(ref, {
+      usageSecondsTotal: usageSecondsTotal + safeSeconds,
+      usageLimitSeconds,
+      usageUpdatedAt: admin.firestore.FieldValue.serverTimestamp()
+    }, { merge: true });
+  });
+}
+
 app.get('/health', async (req, res) => {
   const init = await fbInitPromise;
   res.json({ ok: true, firebase_admin: init.ok ? 'ready' : 'not_ready' });
@@ -105,6 +170,16 @@ app.get('/api/v1/me', authMiddleware, async (req, res) => {
   const uid = req.user.uid;
   const plan = await getUserPlan(uid);
   res.json({ uid, plan, retention_days: retentionForPlan(plan) });
+});
+
+app.get('/api/v1/usage/me', authMiddleware, async (req, res) => {
+  try {
+    const uid = req.user.uid;
+    const usage = await getUserUsage(uid);
+    res.json({ uid, ...usage });
+  } catch (e) {
+    return jsonError(res, 500, 'Failed to read usage', { detail: String(e?.message || e) });
+  }
 });
 
 // --- History APIs ---
@@ -276,9 +351,31 @@ const server = app.listen(PORT, () => {
 
 const rtasrWss = new WebSocketServer({ server, path: '/api/v1/asr/realtime' });
 
-rtasrWss.on('connection', (clientWs) => {
+rtasrWss.on('connection', async (clientWs, req) => {
   let upstream = null;
+  let uid = null;
+  let wsStartedAtMs = nowMs();
   const uiConfig = { mode: 'dual_button', leftLang: 'zh', rightLang: 'en' };
+
+  try {
+    uid = await verifyUserFromWsReq(req);
+    const usage = await getUserUsage(uid);
+    if (usage.remainingSeconds <= 0) {
+      clientWs.send(JSON.stringify({
+        type: 'error',
+        error: { code: 'usage_limit_exceeded', message: 'Usage limit exceeded (60 minutes).' }
+      }));
+      clientWs.close(1008, 'usage_limit_exceeded');
+      return;
+    }
+  } catch (e) {
+    clientWs.send(JSON.stringify({
+      type: 'error',
+      error: { code: 'unauthorized', message: `Unauthorized: ${String(e?.message || e)}` }
+    }));
+    clientWs.close(1008, 'unauthorized');
+    return;
+  }
 
   function decideSideAndDirection(leftLang, rightLang, detectedLang) {
     if (!detectedLang) return { side: 'left', fromLang: leftLang, toLang: rightLang };
@@ -331,8 +428,17 @@ rtasrWss.on('connection', (clientWs) => {
     if (upstream.readyState === WebSocket.OPEN) upstream.send(JSON.stringify(msg));
   });
 
-  clientWs.on('close', () => {
+  clientWs.on('close', async () => {
     upstream?.terminate();
     upstream = null;
+
+    if (uid) {
+      const durationSec = Math.max(0, Math.ceil((nowMs() - wsStartedAtMs) / 1000));
+      try {
+        await addUserUsage(uid, durationSec);
+      } catch (e) {
+        console.error('[Usage] Failed to add usage:', e);
+      }
+    }
   });
 });
