@@ -92,6 +92,40 @@ function retentionForPlan(plan) {
   return 7;
 }
 
+function toISOStringSafe(value) {
+  if (!value) return null;
+  try {
+    if (value instanceof Date) return value.toISOString();
+    if (typeof value?.toDate === 'function') return value.toDate().toISOString();
+    if (typeof value?._seconds === 'number') return new Date(value._seconds * 1000).toISOString();
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+function mapConversationDoc(doc) {
+  const data = doc.data() || {};
+  return {
+    id: doc.id,
+    ...data,
+    createdAtISO: toISOStringSafe(data.createdAt),
+    updatedAtISO: toISOStringSafe(data.updatedAt),
+    lastMessageAtISO: toISOStringSafe(data.lastMessageAt),
+    expireAtISO: toISOStringSafe(data.expireAt)
+  };
+}
+
+function mapMessageDoc(doc) {
+  const data = doc.data() || {};
+  return {
+    id: doc.id,
+    ...data,
+    createdAtISO: toISOStringSafe(data.createdAt),
+    expireAtISO: toISOStringSafe(data.expireAt)
+  };
+}
+
 async function getUserPlan(uid) {
   // For now: default free. Read from Firestore once RevenueCat webhook is set up.
   return 'free';
@@ -265,7 +299,7 @@ app.get('/api/v1/history/conversations', authMiddleware, async (req, res) => {
     const db = admin.firestore();
     const qs = await db.collection('users').doc(uid).collection('conversations')
       .orderBy('updatedAt', 'desc').limit(limit).get();
-    const conversations = qs.docs.map(d => ({ id: d.id, ...d.data() }));
+    const conversations = qs.docs.map(mapConversationDoc);
     res.json({ conversations });
   } catch (e) {
     return jsonError(res, 500, 'Failed to list conversations', { detail: String(e?.message || e) });
@@ -280,7 +314,7 @@ app.get('/api/v1/history/conversations/:conversationId/messages', authMiddleware
     const db = admin.firestore();
     const qs = await db.collection('users').doc(uid).collection('conversations').doc(conversationId)
       .collection('messages').orderBy('createdAt', 'asc').limit(limit).get();
-    const messages = qs.docs.map(d => ({ id: d.id, ...d.data() }));
+    const messages = qs.docs.map(mapMessageDoc);
     res.json({ messages });
   } catch (e) {
     return jsonError(res, 500, 'Failed to list messages', { detail: String(e?.message || e) });
