@@ -398,6 +398,8 @@ rtasrWss.on('connection', async (clientWs, req) => {
   let upstream = null;
   let uid = null;
   let wsStartedAtMs = nowMs();
+  let initialSessionUpdateMsg = null;
+  const pendingClientMsgs = [];
   const uiConfig = { mode: 'dual_button', leftLang: 'zh', rightLang: 'en' };
   const isGuest = isGuestWsReq(req);
 
@@ -439,39 +441,66 @@ rtasrWss.on('connection', async (clientWs, req) => {
     } catch { return; }
 
     if (!upstream) {
-      if (msg?.type !== 'session.update') return;
-      const s = msg.session || {};
-      if (s.mode) uiConfig.mode = s.mode;
-      if (s.left_lang || s.leftLang) uiConfig.leftLang = s.left_lang || s.leftLang;
-      if (s.right_lang || s.rightLang) uiConfig.rightLang = s.right_lang || s.rightLang;
+      if (msg?.type === 'session.update') {
+        initialSessionUpdateMsg = msg;
+        const s = msg.session || {};
+        if (s.mode) uiConfig.mode = s.mode;
+        if (s.left_lang || s.leftLang) uiConfig.leftLang = s.left_lang || s.leftLang;
+        if (s.right_lang || s.rightLang) uiConfig.rightLang = s.right_lang || s.rightLang;
 
-      const apiKey = process.env.DASHSCOPE_API_KEY;
-      const modelName = s.model || 'qwen3-asr-flash-realtime';
-      const baseUrl = process.env.QWEN_REALTIME_WS_URL || 'wss://dashscope-intl.aliyuncs.com/api-ws/v1/realtime';
-      const url = `${baseUrl}?model=${modelName}`;
-
-      upstream = new WebSocket(url, { headers: { Authorization: `Bearer ${apiKey}` } });
-      upstream.on('open', () => upstream.send(JSON.stringify(msg)));
-      upstream.on('message', (data) => {
-        try {
-          const parsed = JSON.parse(data.toString('utf8'));
-          if (parsed.type === 'conversation.item.input_audio_transcription.completed') {
-            const { side, fromLang, toLang } = decideSideAndDirection(uiConfig.leftLang, uiConfig.rightLang, parsed.language);
-            parsed.ui_side = side;
-            parsed.ui_source_lang = fromLang;
-            parsed.ui_target_lang = toLang;
-            parsed.ui_mode = uiConfig.mode;
-          }
-          clientWs.send(JSON.stringify(parsed));
-        } catch {
-          clientWs.send(data);
+        const apiKey = process.env.DASHSCOPE_API_KEY;
+        if (!apiKey) {
+          clientWs.send(JSON.stringify({
+            type: 'error',
+            error: { code: 'server_misconfigured', message: 'Missing env DASHSCOPE_API_KEY' }
+          }));
+          clientWs.close(1011, 'server_misconfigured');
+          return;
         }
-      });
-      upstream.on('close', () => clientWs.close());
-      upstream.on('error', () => clientWs.close());
+
+        const modelName = s.model || 'qwen3-asr-flash-realtime';
+        const baseUrl = process.env.QWEN_REALTIME_WS_URL || 'wss://dashscope-intl.aliyuncs.com/api-ws/v1/realtime';
+        const url = `${baseUrl}?model=${modelName}`;
+
+        upstream = new WebSocket(url, { headers: { Authorization: `Bearer ${apiKey}` } });
+        upstream.on('open', () => {
+          if (initialSessionUpdateMsg) {
+            upstream.send(JSON.stringify(initialSessionUpdateMsg));
+          }
+          for (const queued of pendingClientMsgs) {
+            upstream.send(JSON.stringify(queued));
+          }
+          pendingClientMsgs.length = 0;
+        });
+        upstream.on('message', (data) => {
+          try {
+            const parsed = JSON.parse(data.toString('utf8'));
+            if (parsed.type === 'conversation.item.input_audio_transcription.completed') {
+              const { side, fromLang, toLang } = decideSideAndDirection(uiConfig.leftLang, uiConfig.rightLang, parsed.language);
+              parsed.ui_side = side;
+              parsed.ui_source_lang = fromLang;
+              parsed.ui_target_lang = toLang;
+              parsed.ui_mode = uiConfig.mode;
+            }
+            clientWs.send(JSON.stringify(parsed));
+          } catch {
+            clientWs.send(data);
+          }
+        });
+        upstream.on('close', () => clientWs.close());
+        upstream.on('error', () => clientWs.close());
+        return;
+      }
+
+      pendingClientMsgs.push(msg);
       return;
     }
-    if (upstream.readyState === WebSocket.OPEN) upstream.send(JSON.stringify(msg));
+
+    if (upstream.readyState === WebSocket.OPEN) {
+      upstream.send(JSON.stringify(msg));
+    } else {
+      pendingClientMsgs.push(msg);
+    }
   });
 
   clientWs.on('close', async () => {
