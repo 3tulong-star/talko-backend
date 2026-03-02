@@ -146,6 +146,15 @@ function getWsTokenFromReq(req) {
   return null;
 }
 
+function isGuestWsReq(req) {
+  try {
+    const u = new URL(req.url, `http://${req.headers.host || 'localhost'}`);
+    return u.searchParams.get('guest') === '1';
+  } catch {
+    return false;
+  }
+}
+
 async function verifyUserFromWsReq(req) {
   const token = getWsTokenFromReq(req);
   if (!token) throw new Error('missing_token');
@@ -390,25 +399,28 @@ rtasrWss.on('connection', async (clientWs, req) => {
   let uid = null;
   let wsStartedAtMs = nowMs();
   const uiConfig = { mode: 'dual_button', leftLang: 'zh', rightLang: 'en' };
+  const isGuest = isGuestWsReq(req);
 
-  try {
-    uid = await verifyUserFromWsReq(req);
-    const usage = await getUserUsage(uid);
-    if (usage.remainingSeconds <= 0) {
+  if (!isGuest) {
+    try {
+      uid = await verifyUserFromWsReq(req);
+      const usage = await getUserUsage(uid);
+      if (usage.remainingSeconds <= 0) {
+        clientWs.send(JSON.stringify({
+          type: 'error',
+          error: { code: 'usage_limit_exceeded', message: 'Usage limit exceeded (60 minutes).' }
+        }));
+        clientWs.close(1008, 'usage_limit_exceeded');
+        return;
+      }
+    } catch (e) {
       clientWs.send(JSON.stringify({
         type: 'error',
-        error: { code: 'usage_limit_exceeded', message: 'Usage limit exceeded (60 minutes).' }
+        error: { code: 'unauthorized', message: `Unauthorized: ${String(e?.message || e)}` }
       }));
-      clientWs.close(1008, 'usage_limit_exceeded');
+      clientWs.close(1008, 'unauthorized');
       return;
     }
-  } catch (e) {
-    clientWs.send(JSON.stringify({
-      type: 'error',
-      error: { code: 'unauthorized', message: `Unauthorized: ${String(e?.message || e)}` }
-    }));
-    clientWs.close(1008, 'unauthorized');
-    return;
   }
 
   function decideSideAndDirection(leftLang, rightLang, detectedLang) {
@@ -466,7 +478,7 @@ rtasrWss.on('connection', async (clientWs, req) => {
     upstream?.terminate();
     upstream = null;
 
-    if (uid) {
+    if (uid && !isGuest) {
       const durationSec = Math.max(0, Math.ceil((nowMs() - wsStartedAtMs) / 1000));
       try {
         await addUserUsage(uid, durationSec);
