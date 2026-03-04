@@ -237,6 +237,45 @@ async function transcribeWithOpenAIFromPCM({ audioPcmChunks, languageHint }) {
   return String(data?.text || '').trim();
 }
 
+async function synthesizeWithQwenTTS({ text, lang = 'en', voice = 'Cherry', model }) {
+  const apiKey = process.env.DASHSCOPE_API_KEY;
+  if (!apiKey) throw new Error('missing_dashscope_api_key');
+
+  const url = process.env.QWEN_TTS_URL || 'https://dashscope-intl.aliyuncs.com/compatible-mode/v1/audio/speech';
+  const body = {
+    model: model || process.env.QWEN_TTS_MODEL || 'qwen-tts',
+    voice,
+    input: text,
+    format: 'wav'
+  };
+
+  const resp = await fetch(url, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      Authorization: `Bearer ${apiKey}`
+    },
+    body: JSON.stringify(body)
+  });
+
+  if (!resp.ok) {
+    const detail = await resp.text().catch(() => '');
+    throw new Error(`qwen_tts_failed_${resp.status}:${detail}`);
+  }
+
+  const contentType = resp.headers.get('content-type') || '';
+  if (contentType.includes('application/json')) {
+    const json = await resp.json();
+    const audioBase64 = json?.audio?.data || json?.output?.audio?.data || null;
+    if (!audioBase64) throw new Error('qwen_tts_missing_audio_base64');
+    return { audioBase64, format: 'wav', provider: 'qwen', lang };
+  }
+
+  const arrBuf = await resp.arrayBuffer();
+  const b64 = Buffer.from(arrBuf).toString('base64');
+  return { audioBase64: b64, format: 'wav', provider: 'qwen', lang };
+}
+
 function getWsTokenFromReq(req) {
   try {
     const u = new URL(req.url, `http://${req.headers.host || 'localhost'}`);
@@ -437,6 +476,23 @@ app.get('/api/v1/history/conversations/:conversationId/messages', authMiddleware
 });
 
 // --- Original Translate & ASR APIs ---
+app.post('/api/v1/tts', async (req, res) => {
+  const { text, lang = 'en', voice = 'Cherry', provider = 'qwen', model } = req.body || {};
+  if (!text) return jsonError(res, 400, 'Missing required field: text');
+
+  const selectedProvider = String(provider || 'qwen').toLowerCase();
+  if (selectedProvider !== 'qwen') {
+    return jsonError(res, 400, 'Unsupported tts provider', { provider: selectedProvider });
+  }
+
+  try {
+    const result = await synthesizeWithQwenTTS({ text, lang, voice, model });
+    res.json(result);
+  } catch (e) {
+    return jsonError(res, 500, 'TTS failed', { detail: String(e?.message || e) });
+  }
+});
+
 app.post('/api/v1/translate/text', async (req, res) => {
   const { text, source_lang, target_lang, stream = false, model, provider } = req.body || {};
   if (!text || !source_lang || !target_lang) {
@@ -614,39 +670,13 @@ rtasrWss.on('connection', async (clientWs, req) => {
             return;
           }
 
-          const pcmBuffer = Buffer.concat(openaiAudioChunks.map((b64) => Buffer.from(b64, 'base64')));
+          const audioBuffers = openaiAudioChunks.map((b64) => Buffer.from(b64, 'base64'));
           openaiAudioChunks = [];
 
-          if (pcmBuffer.length === 0) {
-            clientWs.send(JSON.stringify({ type: 'session.finished' }));
-            clientWs.close();
-            return;
-          }
-
-          const wavBuffer = pcm16ToWav(pcmBuffer, 16000, 1);
-          const form = new FormData();
-          form.append('model', process.env.OPENAI_ASR_MODEL || 'gpt-4o-transcribe');
-          form.append('language', openaiLanguageHint || 'en');
-          form.append('file', new Blob([wavBuffer], { type: 'audio/wav' }), 'audio.wav');
-
-          const r = await fetch(process.env.OPENAI_ASR_URL || 'https://api.openai.com/v1/audio/transcriptions', {
-            method: 'POST',
-            headers: { Authorization: `Bearer ${apiKey}` },
-            body: form
+          const transcript = await transcribeWithOpenAIFromPCM({
+            audioPcmChunks: audioBuffers,
+            languageHint: openaiLanguageHint || 'en'
           });
-
-          if (!r.ok) {
-            const body = await r.text().catch(() => '');
-            clientWs.send(JSON.stringify({
-              type: 'error',
-              error: { code: 'openai_asr_failed', message: `OpenAI ASR failed: HTTP ${r.status} ${body}` }
-            }));
-            clientWs.close(1011, 'openai_asr_failed');
-            return;
-          }
-
-          const data = await r.json();
-          const transcript = data?.text || '';
           const { side, fromLang, toLang } = decideSideAndDirection(uiConfig.leftLang, uiConfig.rightLang, openaiLanguageHint || uiConfig.leftLang);
 
           clientWs.send(JSON.stringify({
