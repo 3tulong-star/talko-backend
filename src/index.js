@@ -131,6 +131,112 @@ async function getUserPlan(uid) {
   return 'free';
 }
 
+function getLangPairKey(source, target) {
+  return `${String(source || '').toLowerCase()}->${String(target || '').toLowerCase()}`;
+}
+
+function getJsonMapFromEnv(envName) {
+  const raw = process.env[envName];
+  if (!raw) return {};
+  try {
+    const parsed = JSON.parse(raw);
+    return (parsed && typeof parsed === 'object') ? parsed : {};
+  } catch {
+    return {};
+  }
+}
+
+function resolveASRProvider({ requestedProvider, leftLang, rightLang }) {
+  if (requestedProvider) return String(requestedProvider).toLowerCase();
+  const pairMap = getJsonMapFromEnv('ASR_PROVIDER_MAP_JSON');
+  const pair = getLangPairKey(leftLang, rightLang);
+  return String(pairMap[pair] || process.env.DEFAULT_ASR_PROVIDER || 'qwen').toLowerCase();
+}
+
+function resolveTranslationProvider({ requestedProvider, sourceLang, targetLang }) {
+  if (requestedProvider) return String(requestedProvider).toLowerCase();
+  const pairMap = getJsonMapFromEnv('TRANSLATION_PROVIDER_MAP_JSON');
+  const pair = getLangPairKey(sourceLang, targetLang);
+  return String(pairMap[pair] || process.env.DEFAULT_TRANSLATION_PROVIDER || 'doubao').toLowerCase();
+}
+
+function pcm16ToWav(pcmBuffer, sampleRate = 16000, channels = 1) {
+  const bitsPerSample = 16;
+  const byteRate = sampleRate * channels * bitsPerSample / 8;
+  const blockAlign = channels * bitsPerSample / 8;
+  const dataSize = pcmBuffer.length;
+  const buffer = Buffer.alloc(44 + dataSize);
+
+  buffer.write('RIFF', 0);
+  buffer.writeUInt32LE(36 + dataSize, 4);
+  buffer.write('WAVE', 8);
+  buffer.write('fmt ', 12);
+  buffer.writeUInt32LE(16, 16);
+  buffer.writeUInt16LE(1, 20);
+  buffer.writeUInt16LE(channels, 22);
+  buffer.writeUInt32LE(sampleRate, 24);
+  buffer.writeUInt32LE(byteRate, 28);
+  buffer.writeUInt16LE(blockAlign, 32);
+  buffer.writeUInt16LE(bitsPerSample, 34);
+  buffer.write('data', 36);
+  buffer.writeUInt32LE(dataSize, 40);
+
+  pcmBuffer.copy(buffer, 44);
+  return buffer;
+}
+
+function pcm16ToWavBuffer(pcmBuffer, sampleRate = 16000, channels = 1, bitsPerSample = 16) {
+  const byteRate = sampleRate * channels * (bitsPerSample / 8);
+  const blockAlign = channels * (bitsPerSample / 8);
+  const dataSize = pcmBuffer.length;
+  const wav = Buffer.alloc(44 + dataSize);
+
+  wav.write('RIFF', 0);
+  wav.writeUInt32LE(36 + dataSize, 4);
+  wav.write('WAVE', 8);
+  wav.write('fmt ', 12);
+  wav.writeUInt32LE(16, 16);
+  wav.writeUInt16LE(1, 20);
+  wav.writeUInt16LE(channels, 22);
+  wav.writeUInt32LE(sampleRate, 24);
+  wav.writeUInt32LE(byteRate, 28);
+  wav.writeUInt16LE(blockAlign, 32);
+  wav.writeUInt16LE(bitsPerSample, 34);
+  wav.write('data', 36);
+  wav.writeUInt32LE(dataSize, 40);
+  pcmBuffer.copy(wav, 44);
+
+  return wav;
+}
+
+async function transcribeWithOpenAIFromPCM({ audioPcmChunks, languageHint }) {
+  const apiKey = process.env.OPENAI_API_KEY;
+  if (!apiKey) throw new Error('missing_openai_api_key');
+
+  const joined = Buffer.concat(audioPcmChunks);
+  if (!joined.length) return '';
+
+  const wav = pcm16ToWavBuffer(joined, 16000, 1, 16);
+  const form = new FormData();
+  form.append('model', process.env.OPENAI_ASR_MODEL || 'gpt-4o-transcribe');
+  if (languageHint) form.append('language', languageHint);
+  form.append('file', new Blob([wav], { type: 'audio/wav' }), 'audio.wav');
+
+  const resp = await fetch(process.env.OPENAI_ASR_URL || 'https://api.openai.com/v1/audio/transcriptions', {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${apiKey}` },
+    body: form
+  });
+
+  if (!resp.ok) {
+    const detail = await resp.text().catch(() => '');
+    throw new Error(`openai_transcribe_failed_${resp.status}:${detail}`);
+  }
+
+  const data = await resp.json();
+  return String(data?.text || '').trim();
+}
+
 function getWsTokenFromReq(req) {
   try {
     const u = new URL(req.url, `http://${req.headers.host || 'localhost'}`);
@@ -332,24 +438,65 @@ app.get('/api/v1/history/conversations/:conversationId/messages', authMiddleware
 
 // --- Original Translate & ASR APIs ---
 app.post('/api/v1/translate/text', async (req, res) => {
-  const { text, source_lang, target_lang, stream = false, model } = req.body || {};
+  const { text, source_lang, target_lang, stream = false, model, provider } = req.body || {};
   if (!text || !source_lang || !target_lang) {
     return jsonError(res, 400, 'Missing required fields: text, source_lang, target_lang');
   }
 
-  const apiKey = process.env.DOUBAO_API_KEY;
-  if (!apiKey) return jsonError(res, 500, 'Missing env DOUBAO_API_KEY');
+  const selectedProvider = resolveTranslationProvider({
+    requestedProvider: provider,
+    sourceLang: source_lang,
+    targetLang: target_lang
+  });
 
   const prompt = `请将以下${source_lang}句子翻译成${target_lang}。\n要求：只返回翻译结果，不要有其他解释。\n\n原文：${text}\n\n翻译：`;
-  const url = 'https://ark.cn-beijing.volces.com/api/v3/chat/completions';
-  const body = {
-    model: model || process.env.DOUBAO_MODEL || 'doubao-seed-1-6-flash-250828',
-    stream: !!stream,
-    max_output_tokens: 1024,
-    temperature: 0.1,
-    thinking: { type: 'disabled' },
-    messages: [{ role: 'user', content: prompt }]
-  };
+
+  let url;
+  let body;
+  let headers;
+
+  if (selectedProvider === 'openai') {
+    const apiKey = process.env.OPENAI_API_KEY;
+    if (!apiKey) return jsonError(res, 500, 'Missing env OPENAI_API_KEY');
+    url = process.env.OPENAI_TRANSLATE_URL || 'https://api.openai.com/v1/chat/completions';
+    body = {
+      model: model || process.env.OPENAI_TRANSLATE_MODEL || 'gpt-4o-mini',
+      stream: !!stream,
+      temperature: 0.1,
+      messages: [{ role: 'user', content: prompt }]
+    };
+    headers = { 'Content-Type': 'application/json', Authorization: `Bearer ${apiKey}` };
+  } else if (selectedProvider === 'minimax') {
+    const apiKey = process.env.MINIMAX_API_KEY;
+    if (!apiKey) return jsonError(res, 500, 'Missing env MINIMAX_API_KEY');
+    const groupId = process.env.MINIMAX_GROUP_ID;
+    if (!groupId) return jsonError(res, 500, 'Missing env MINIMAX_GROUP_ID');
+
+    url = process.env.MINIMAX_TRANSLATE_URL || `https://api.minimax.chat/v1/text/chatcompletion_pro?GroupId=${groupId}`;
+    body = {
+      model: model || process.env.MINIMAX_TRANSLATE_MODEL || 'MiniMax-Text-01',
+      messages: [{ sender_type: 'USER', text: prompt }],
+      temperature: 0.1,
+      stream: !!stream
+    };
+    headers = {
+      'Content-Type': 'application/json',
+      Authorization: `Bearer ${apiKey}`
+    };
+  } else {
+    const apiKey = process.env.DOUBAO_API_KEY;
+    if (!apiKey) return jsonError(res, 500, 'Missing env DOUBAO_API_KEY');
+    url = process.env.DOUBAO_TRANSLATE_URL || 'https://ark.cn-beijing.volces.com/api/v3/chat/completions';
+    body = {
+      model: model || process.env.DOUBAO_MODEL || 'doubao-seed-1-6-flash-250828',
+      stream: !!stream,
+      max_output_tokens: 1024,
+      temperature: 0.1,
+      thinking: { type: 'disabled' },
+      messages: [{ role: 'user', content: prompt }]
+    };
+    headers = { 'Content-Type': 'application/json', Authorization: `Bearer ${apiKey}` };
+  }
 
   const t0 = nowMs();
   const ac = new AbortController();
@@ -358,7 +505,7 @@ app.post('/api/v1/translate/text', async (req, res) => {
   try {
     const r = await fetch(url, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${apiKey}` },
+      headers,
       body: JSON.stringify(body),
       signal: ac.signal
     });
@@ -367,8 +514,11 @@ app.post('/api/v1/translate/text', async (req, res) => {
 
     if (!stream) {
       const data = await r.json();
-      const translation = data?.choices?.[0]?.message?.content ?? '';
-      return res.json({ translation, timing: { total_ms: nowMs() - t0 } });
+      let translation = data?.choices?.[0]?.message?.content ?? '';
+      if (selectedProvider === 'minimax') {
+        translation = data?.reply || data?.base_resp?.status_msg || translation || '';
+      }
+      return res.json({ translation, provider: selectedProvider, timing: { total_ms: nowMs() - t0 } });
     }
 
     res.setHeader('Content-Type', 'text/event-stream; charset=utf-8');
@@ -403,6 +553,11 @@ rtasrWss.on('connection', async (clientWs, req) => {
   const uiConfig = { mode: 'dual_button', leftLang: 'zh', rightLang: 'en' };
   const isGuest = isGuestWsReq(req);
 
+  // OpenAI gpt-4o-transcribe fallback state
+  let asrProvider = 'qwen';
+  let openaiAudioChunks = [];
+  let openaiLanguageHint = null;
+
   if (!isGuest) {
     try {
       uid = await verifyUserFromWsReq(req);
@@ -434,11 +589,100 @@ rtasrWss.on('connection', async (clientWs, req) => {
     return { side: 'left', fromLang: detectedLang, toLang: rightLang };
   }
 
-  clientWs.on('message', (buf) => {
+  clientWs.on('message', async (buf) => {
     let msg;
     try {
       msg = JSON.parse(buf.toString('utf8'));
     } catch { return; }
+
+    // OpenAI gpt-4o-transcribe path (HTTP transcription, non-realtime upstream)
+    if (asrProvider === 'openai') {
+      if (msg?.type === 'input_audio_buffer.append' && msg.audio) {
+        openaiAudioChunks.push(String(msg.audio));
+        return;
+      }
+
+      if (msg?.type === 'input_audio_buffer.commit' || msg?.type === 'session.finish') {
+        try {
+          const apiKey = process.env.OPENAI_API_KEY;
+          if (!apiKey) {
+            clientWs.send(JSON.stringify({
+              type: 'error',
+              error: { code: 'server_misconfigured', message: 'Missing env OPENAI_API_KEY' }
+            }));
+            clientWs.close(1011, 'server_misconfigured');
+            return;
+          }
+
+          const pcmBuffer = Buffer.concat(openaiAudioChunks.map((b64) => Buffer.from(b64, 'base64')));
+          openaiAudioChunks = [];
+
+          if (pcmBuffer.length === 0) {
+            clientWs.send(JSON.stringify({ type: 'session.finished' }));
+            clientWs.close();
+            return;
+          }
+
+          const wavBuffer = pcm16ToWav(pcmBuffer, 16000, 1);
+          const form = new FormData();
+          form.append('model', process.env.OPENAI_ASR_MODEL || 'gpt-4o-transcribe');
+          form.append('language', openaiLanguageHint || 'en');
+          form.append('file', new Blob([wavBuffer], { type: 'audio/wav' }), 'audio.wav');
+
+          const r = await fetch(process.env.OPENAI_ASR_URL || 'https://api.openai.com/v1/audio/transcriptions', {
+            method: 'POST',
+            headers: { Authorization: `Bearer ${apiKey}` },
+            body: form
+          });
+
+          if (!r.ok) {
+            const body = await r.text().catch(() => '');
+            clientWs.send(JSON.stringify({
+              type: 'error',
+              error: { code: 'openai_asr_failed', message: `OpenAI ASR failed: HTTP ${r.status} ${body}` }
+            }));
+            clientWs.close(1011, 'openai_asr_failed');
+            return;
+          }
+
+          const data = await r.json();
+          const transcript = data?.text || '';
+          const { side, fromLang, toLang } = decideSideAndDirection(uiConfig.leftLang, uiConfig.rightLang, openaiLanguageHint || uiConfig.leftLang);
+
+          clientWs.send(JSON.stringify({
+            type: 'conversation.item.input_audio_transcription.completed',
+            transcript,
+            language: openaiLanguageHint || uiConfig.leftLang,
+            ui_side: side,
+            ui_source_lang: fromLang,
+            ui_target_lang: toLang,
+            ui_mode: uiConfig.mode,
+            provider: 'openai'
+          }));
+
+          clientWs.send(JSON.stringify({ type: 'session.finished' }));
+          if (msg?.type === 'session.finish') {
+            clientWs.close();
+          }
+          return;
+        } catch (e) {
+          clientWs.send(JSON.stringify({
+            type: 'error',
+            error: { code: 'openai_asr_exception', message: String(e?.message || e) }
+          }));
+          clientWs.close(1011, 'openai_asr_exception');
+          return;
+        }
+      }
+
+      if (msg?.type === 'session.update') {
+        const s = msg.session || {};
+        if (s.left_lang || s.leftLang) uiConfig.leftLang = s.left_lang || s.leftLang;
+        if (s.right_lang || s.rightLang) uiConfig.rightLang = s.right_lang || s.rightLang;
+        openaiLanguageHint = uiConfig.leftLang || 'en';
+      }
+      return;
+    }
 
     if (!upstream) {
       if (msg?.type === 'session.update') {
@@ -447,6 +691,22 @@ rtasrWss.on('connection', async (clientWs, req) => {
         if (s.mode) uiConfig.mode = s.mode;
         if (s.left_lang || s.leftLang) uiConfig.leftLang = s.left_lang || s.leftLang;
         if (s.right_lang || s.rightLang) uiConfig.rightLang = s.right_lang || s.rightLang;
+
+        const requestedProvider = s.provider || null;
+        const selectedProvider = resolveASRProvider({
+          requestedProvider,
+          leftLang: uiConfig.leftLang,
+          rightLang: uiConfig.rightLang
+        });
+
+        asrProvider = selectedProvider;
+
+        if (asrProvider === 'openai') {
+          openaiAudioChunks = [];
+          openaiLanguageHint = uiConfig.leftLang || 'en';
+          clientWs.send(JSON.stringify({ type: 'session.ready', provider: 'openai' }));
+          return;
+        }
 
         const apiKey = process.env.DASHSCOPE_API_KEY;
         if (!apiKey) {
@@ -458,7 +718,7 @@ rtasrWss.on('connection', async (clientWs, req) => {
           return;
         }
 
-        const modelName = s.model || 'qwen3-asr-flash-realtime';
+        const modelName = s.model || process.env.QWEN_REALTIME_MODEL || 'qwen3-asr-flash-realtime';
         const baseUrl = process.env.QWEN_REALTIME_WS_URL || 'wss://dashscope-intl.aliyuncs.com/api-ws/v1/realtime';
         const url = `${baseUrl}?model=${modelName}`;
 
