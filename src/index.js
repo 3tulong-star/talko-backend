@@ -607,6 +607,8 @@ app.post('/api/v1/tts', async (req, res) => {
   const { text, lang = 'en', voice = 'Cherry', provider = 'qwen', model } = req.body || {};
   if (!text) return jsonError(res, 400, 'Missing required field: text');
 
+  console.log(`[TTS] request provider=${provider} model=${model || process.env.QWEN_TTS_MODEL || 'qwen-tts'} lang=${lang} text_len=${String(text).length}`);
+
   const selectedProvider = String(provider || 'qwen').toLowerCase();
   if (selectedProvider !== 'qwen') {
     return jsonError(res, 400, 'Unsupported tts provider', { provider: selectedProvider });
@@ -623,9 +625,12 @@ app.post('/api/v1/tts', async (req, res) => {
   }
 
   try {
+    const t0 = nowMs();
     const result = await synthesizeWithQwenTTS({ text, lang: normalizedLang, voice, model: effectiveModel });
+    console.log(`[TTS] success provider=${result?.provider || 'qwen'} model=${result?.model || effectiveModel} lang=${normalizedLang} ms=${nowMs() - t0}`);
     res.json(result);
   } catch (e) {
+    console.error(`[TTS] failed provider=qwen model=${effectiveModel} lang=${normalizedLang} err=${String(e?.message || e)}`);
     return jsonError(res, 500, 'TTS failed', { detail: String(e?.message || e) });
   }
 });
@@ -682,6 +687,12 @@ app.post('/api/v1/translate/text', async (req, res) => {
     url = process.env.MINIMAX_TRANSLATE_URL || `https://api.minimax.chat/v1/text/chatcompletion_pro?GroupId=${groupId}`;
     body = {
       model: model || process.env.MINIMAX_TRANSLATE_MODEL || 'MiniMax-Text-01',
+      bot_setting: [
+        {
+          bot_name: 'TalkoTranslator',
+          content: 'You are a professional translation engine. Only output translated text.'
+        }
+      ],
       messages: [{ sender_type: 'USER', text: prompt }],
       temperature: 0.1,
       stream: !!stream
