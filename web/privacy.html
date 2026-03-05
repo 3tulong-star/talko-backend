@@ -1,0 +1,279 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Privacy Policy - Talko</title>
+  <style>
+    body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; line-height: 1.6; max-width: 800px; margin: 0 auto; padding: 20px; color: #333; }
+    h1 { color: #111; font-size: 28px; }
+    h2 { color: #222; font-size: 20px; margin-top: 30px; }
+    h3 { color: #333; font-size: 16px; margin-top: 20px; }
+    p { margin: 12px 0; }
+    ul, ol { padding-left: 20px; }
+    li { margin: 8px 0; }
+    .last-updated { color: #666; font-size: 14px; }
+    .contact { background: #f5f5f5; padding: 15px; border-radius: 8px; }
+    a { color: #007AFF; }
+    .lang-selector { position: fixed; top: 10px; right: 10px; z-index: 100; }
+    .lang-selector select { padding: 8px 12px; border-radius: 8px; border: 1px solid #ccc; font-size: 14px; background: white; }
+  </style>
+</head>
+<body>
+  <div class="lang-selector">
+    <select id="langSelect" onchange="switchLanguage(this.value)">
+      <option value="zh">中文</option>
+      <option value="en">English</option>
+      <option value="ja">日本語</option>
+      <option value="ko">한국어</option>
+      <option value="de">Deutsch</option>
+      <option value="fr">Français</option>
+      <option value="es">Español</option>
+      <option value="it">Italiano</option>
+      <option value="pt">Português</option>
+      <option value="ru">Русский</option>
+      <option value="ar">العربية</option>
+      <option value="hi">हिन्दी</option>
+      <option value="id">Bahasa Indonesia</option>
+      <option value="th">ภาษาไทย</option>
+      <option value="tr">Türkçe</option>
+      <option value="uk">Українська</option>
+      <option value="vi">Tiếng Việt</option>
+      <option value="cs">Čeština</option>
+      <option value="da">Dansk</option>
+      <option value="fil">Filipino</option>
+      <option value="fi">Suomi</option>
+      <option value="is">Íslenska</option>
+      <option value="ms">Bahasa Melayu</option>
+      <option value="no">Norsk</option>
+      <option value="pl">Polski</option>
+      <option value="sv">Svenska</option>
+    </select>
+  </div>
+
+  <div id="content"></div>
+
+  <script>
+    const translations = {
+      zh: {
+        title: "隐私政策",
+        lastUpdated: "最后更新：2026年3月",
+        intro: "Talko（以下简称"我们"或"本应用"）尊重您的隐私。本隐私政策说明了我们如何收集、使用、存储和保护您的个人信息。在使用本应用前，请仔细阅读并了解本隐私政策。如果您不同意本政策的任何内容，请停止使用本应用。",
+        section1Title: "一、引言",
+        section2Title: "二、数据收集",
+        section2aTitle: "1. 您主动提供的信息",
+        section2aList: ["账号信息：当您使用 Apple ID 或 Google 账号登录时，我们会收集您的邮箱地址和唯一标识符。", "语音数据：当您使用语音翻译功能时，我们会收集您的语音录音用于识别和翻译。"],
+        section2bTitle: "2. 自动收集的信息",
+        section2bList: ["使用数据：我们会记录您的使用时长、功能使用情况等数据，用于改进服务质量。", "设备信息：我们可能收集设备类型、操作系统版本等基本信息。"],
+        section3Title: "三、数据使用",
+        section3List: ["提供语音识别和翻译服务", "维护和优化应用功能", "用户身份验证和账号管理", "遵守法律义务"],
+        section4Title: "四、数据存储与保护",
+        section4List: ["您的语音数据仅用于当次翻译处理，不会永久存储。", "账号相关数据存储在 Firebase 服务器上。", "我们会采取合理的技术和安全措施保护您的数据。"],
+        section5Title: "五、数据共享",
+        section5Intro: "我们不会出售您的个人信息。以下情况除外：",
+        section5List: ["经您明确同意后共享", "为提供必需服务而向合作伙伴共享（如语音识别服务提供商）", "法律法规要求的情形"],
+        section6Title: "六、您的权利",
+        section6List: ["访问权：您有权了解我们收集了您的哪些数据。", "删除权：您有权要求我们删除您的个人数据。", "注销账号：您可以随时在应用内注销账号，注销后您的数据将被永久删除。"],
+        section7Title: "七、账号删除",
+        section7Steps: ["打开 Talko 应用", "点击右下角"我的"", "点击"删除账号"", "确认删除操作"],
+        section7Note: "账号删除后，所有相关数据将在30天内永久清除。",
+        section8Title: "八、未成年人隐私",
+        section8Text: "我们不会故意收集未成年人的个人信息。如果您是未成年人，请在监护人指导下使用本应用。",
+        section9Title: "九、政策更新",
+        section9Text: "我们可能会不时更新本隐私政策。更新后的政策将在应用内公示，建议您定期查看。",
+        section10Title: "十、联系我们",
+        section10Text: "如果您对本隐私政策有任何疑问，请联系我们：",
+        email: "电子邮件：support@talko-app.com"
+      },
+      en: {
+        title: "Privacy Policy",
+        lastUpdated: "Last updated: March 2026",
+        intro: "Talko (\"we\", \"us\", or \"our app\") respects your privacy. This Privacy Policy explains how we collect, use, store, and protect your personal information. Please read and understand this Privacy Policy before using our app. If you disagree with any part of this policy, please stop using the app.",
+        section1Title: "1. Introduction",
+        section2Title: "2. Data Collection",
+        section2aTitle: "2.1 Information You Provide",
+        section2aList: ["Account Information: When you sign in with Apple ID or Google, we collect your email address and unique identifier.", "Voice Data: When you use voice translation, we collect voice recordings for recognition and translation."],
+        section2bTitle: "2.2 Automatically Collected Information",
+        section2bList: ["Usage Data: We record usage duration and feature usage to improve service quality.", "Device Information: We may collect basic device type and OS version information."],
+        section3Title: "3. Data Usage",
+        section3List: ["Provide voice recognition and translation services", "Maintain and optimize app functionality", "User authentication and account management", "Comply with legal obligations"],
+        section4Title: "4. Data Storage & Protection",
+        section4List: ["Your voice data is only used for immediate translation processing and is not permanently stored.", "Account-related data is stored on Firebase servers.", "We implement reasonable technical and security measures to protect your data."],
+        section5Title: "5. Data Sharing",
+        section5Intro: "We do not sell your personal information. Exceptions include:",
+        section5List: ["Sharing with your explicit consent", "Sharing with partners to provide required services (e.g., speech recognition providers)", "When required by law"],
+        section6Title: "6. Your Rights",
+        section6List: ["Right to Access: You have the right to know what data we collect.", "Right to Delete: You have the right to request deletion of your personal data.", "Right to Delete Account: You can delete your account at any time in the app."],
+        section7Title: "7. Account Deletion",
+        section7Steps: ["Open the Talko app", "Tap \"Profile\" in the bottom right", "Tap \"Delete Account\"", "Confirm deletion"],
+        section7Note: "All related data will be permanently deleted within 30 days after account deletion.",
+        section8Title: "8. Minors' Privacy",
+        section8Text: "We do not intentionally collect personal information from minors. If you are a minor, please use this app under the guidance of a guardian.",
+        section9Title: "9. Policy Updates",
+        section9Text: "We may update this Privacy Policy from time to time. Updated policies will be posted in the app.",
+        section10Title: "10. Contact Us",
+        section10Text: "If you have any questions about this Privacy Policy, please contact us:",
+        email: "Email: support@talko-app.com"
+      },
+      ja: {
+        title: "プライバシーポリシー",
+        lastUpdated: "最終更新：2026年3月",
+        intro: "Talko（以下「私たち」または「本アプリ」）はお客様のごプライバシーを尊重します。このプライバシーポリシーは、私たちの個人情報の収集、使用、保管、保护について説明します。このプライバシーポリシーを理解し同意してからアプリをご使用ください。同意されない場合は、アプリの使用を終えてください。",
+        section1Title: "1. はじめに",
+        section2Title: "2. データの収集",
+        section2aTitle: "2.1 用户提供情報",
+        section2aList: ["アカウント情報：Apple IDまたはGoogleでログイン的时候我们会收集您的邮箱地址和唯一标识符。", "音声データ：音声翻訳機能を使用的时候我们会收集您的语音录音用于识别和翻译。"],
+        section2bTitle: "2.2 自動収集情報",
+        section2bList: ["使用データ：サービス向上のため、使用時間、機能使用状況などを記録します。", "デバイス情報：デバイスタイプ、OSバージョンなどの基本情報を収集する場合があります。"],
+        section3Title: "3. データ使用",
+        section3List: ["音声認識・翻訳サービスの提供", "アプリの維持・最適化", "ユーザー認証・アカウント管理", "法的義務の遵守"],
+        section4Title: "4. データ保管・保護",
+        section4List: ["音声データは翻訳処理にのみ使用し、永久保存はありません。", "アカウントデータはFirebaseサーバーに保管します。", "合理的 技术・セキュリティ対策を講じデータを保護します。"],
+        section5Title: "5. データ共有",
+        section5Intro: "个人信息を出售することはしません。以下の場合を除く：",
+        section5List: ["明示的同意を得た場合の共有", "必要なサービスを提供するためのパートナーとの共有", "法的に要求された場合"],
+        section6Title: "6. 顧客の権利",
+        section6List: ["アクセス権：収集するデータを知る権利があります。", "削除権：個人情報の削除を要求する権利があります。", "アカウント削除：アプリ内でいつでもアカウントを削除できます。"],
+        section7Title: "7. アカウント削除",
+        section7Steps: ["Talkoアプリを開く", "右下の「マイ」をタップ", "「アカウント削除」をタップ", "削除を確認"],
+        section7Note: "アカウント削除後、関連するデータは30日以内に完全に消去されます。",
+        section8Title: "8. 未成年者のプライバシー",
+        section8Text: "未成年者の個人情報を意図的に収集することはしません。未成年者は保護者と一緒にご使用ください。",
+        section9Title: "9. ポリシー更新",
+        section9Text: "このプライバシーポリシーを時々更新する場合があります。更新后的政策将在应用内公示。",
+        section10Title: "10.联系我们",
+        section10Text: "プライバシーポリシーについてご質問がある場合は、お気軽にお問い合わせください：",
+        email: "メール：support@talko-app.com"
+      },
+      ko: {
+        title: "개인정보 처리방침",
+        lastUpdated: "최종 업데이트: 2026년 3월",
+        intro: "Talko(당사 또는 본 앱)는 고객의 개인정보를 존중합니다. 이 개인정보 처리방침은 당사가 개인정보를 어떻게 수집, 사용, 보관, 보호하는지 설명합니다. 앱을 사용하기 전에 이 개인정보 처리방침을 읽고 이해해 주세요. 이 정책에 동의하지 않으시면 앱 사용을 중단해 주세요.",
+        section1Title: "1. 서론",
+        section2Title: "2. 데이터 수집",
+        section2aTitle: "2.1 사용자가 제공하는 정보",
+        section2aList: ["계정 정보: Apple ID 또는 Google로 로그인할 때 이메일 주소와 고유 식별자를 수집합니다.", "음성 데이터: 음성 번역 기능을 사용할 때 인식과 번역을 위해 음성 녹음을 수집합니다."],
+        section2bTitle: "2.2 자동 수집 정보",
+        section2bList: ["사용 데이터: 서비스 품질 향상을 위해 사용 시간 및 기능 사용 상황을 기록합니다.", "기기 정보: 기기 유형 및 OS 버전을 수집할 수 있습니다."],
+        section3Title: "3. 데이터 사용",
+        section3List: ["음성 인식 및 번역 서비스 제공", "앱 기능 유지 및 최적화", "사용자 인증 및 계정 관리", "법적 의무 준수"],
+        section4Title: "4. 데이터 보관 및 보호",
+        section4List: ["음성 데이터는 즉각적인 번역 처리에만 사용되며 영구 보관되지 않습니다.", "계정 관련 데이터는 Firebase 서버에 저장됩니다.", "데이터 보호를 위해 합리적인 기술 및 보안 조치를 구현합니다."],
+        section5Title: "5. 데이터 공유",
+        section5Intro: "당사는 개인 정보를 판매하지 않습니다. 예외 사항:",
+        section5List: ["명시적 동의を得た場合の共有", "필요한 서비스를 제공하기 위한 파트너와의 공유", "법적으로 요구되는 경우"],
+        section6Title: "6. 고객의 권리",
+        section6List: ["アクセス権：収集するデータを知る権利があります。", "삭제권: 개인정보 삭제를 요청할 권리가 있습니다.", "계정 삭제: 앱 내에서 언제든지 계정을 삭제할 수 있습니다."],
+        section7Title: "7. 계정 삭제",
+        section7Steps: ["Talko 앱을 엽니다", "오른쪽 하단의 \"프로필\"을 탭합니다", "\"계정 삭제\"를 탭합니다", "삭제를 확인합니다"],
+        section7Note: "계정 삭제 후 모든 관련 데이터는 30일 이내에 영구적으로 삭제됩니다.",
+        section8Title: "8. 미성년자 개인정보",
+        section8Text: "당사는 의도적으로 미성년자의 개인정보를 수집하지 않습니다. 미성년자인 경우 보호자의 감독 하에 앱을 사용해 주세요.",
+        section9Title: "9. 정책 업데이트",
+        section9Text: "당사는 이 개인정보 처리방침을 수시로 업데이트할 수 있습니다. 업데이트된 정책은 앱에 게시됩니다.",
+        section10Title: "10.联系我们",
+        section10Text: "이 개인정보 처리방침에 대한 질문이 있으면联系我们:",
+        email: "이메일: support@talko-app.com"
+      }
+    };
+
+    // For languages not fully translated, use English
+    function getContent(lang) {
+      let t = translations[lang];
+      if (!t) {
+        t = translations['en'];
+        lang = 'en';
+      }
+      
+      return `
+        <h1>${t.title}</h1>
+        <p class="last-updated">${t.lastUpdated}</p>
+
+        <h2>${t.section1Title}</h2>
+        <p>${t.intro}</p>
+
+        <h2>${t.section2Title}</h2>
+        <h3>${t.section2aTitle}</h3>
+        <ul>
+          ${t.section2aList.map(item => `<li>${item}</li>`).join('')}
+        </ul>
+
+        <h3>${t.section2bTitle}</h3>
+        <ul>
+          ${t.section2bList.map(item => `<li>${item}</li>`).join('')}
+        </ul>
+
+        <h2>${t.section3Title}</h2>
+        <ul>
+          ${t.section3List.map(item => `<li>${item}</li>`).join('')}
+        </ul>
+
+        <h2>${t.section4Title}</h2>
+        <ul>
+          ${t.section4List.map(item => `<li>${item}</li>`).join('')}
+        </ul>
+
+        <h2>${t.section5Title}</h2>
+        <p>${t.section5Intro}</p>
+        <ul>
+          ${t.section5List.map(item => `<li>${item}</li>`).join('')}
+        </ul>
+
+        <h2>${t.section6Title}</h2>
+        <ul>
+          ${t.section6List.map(item => `<li>${item}</li>`).join('')}
+        </ul>
+
+        <h2>${t.section7Title}</h2>
+        <ol>
+          ${t.section7Steps.map(item => `<li>${item}</li>`).join('')}
+        </ol>
+        <p>${t.section7Note}</p>
+
+        <h2>${t.section8Title}</h2>
+        <p>${t.section8Text}</p>
+
+        <h2>${t.section9Title}</h2>
+        <p>${t.section9Text}</p>
+
+        <h2>${t.section10Title}</h2>
+        <p>${t.section10Text}</p>
+        <div class="contact">
+          <p>${t.email}</p>
+        </div>
+
+        <hr style="margin-top: 40px; border: none; border-top: 1px solid #eee;" />
+        <p style="color: #999; font-size: 12px; text-align: center;">© 2026 Talko. All rights reserved.</p>
+      `;
+    }
+
+    function switchLanguage(lang) {
+      document.getElementById('content').innerHTML = getContent(lang);
+      document.documentElement.lang = lang;
+      localStorage.setItem('talko_privacy_lang', lang);
+    }
+
+    window.onload = function() {
+      let savedLang = localStorage.getItem('talko_privacy_lang');
+      const urlParams = new URLSearchParams(window.location.search);
+      const urlLang = urlParams.get('lang');
+      
+      if (urlLang) {
+        savedLang = urlLang;
+      } else if (!savedLang) {
+        const browserLang = navigator.language || navigator.userLanguage;
+        savedLang = browserLang.split('-')[0];
+      }
+      
+      const select = document.getElementById('langSelect');
+      if (savedLang && translations[savedLang]) {
+        select.value = savedLang;
+      } else {
+        select.value = 'en';
+      }
+      
+      switchLanguage(select.value);
+    };
+  </script>
+</body>
+</html>
