@@ -505,7 +505,21 @@ app.post('/api/v1/translate/text', async (req, res) => {
     targetLang: target_lang
   });
 
-  const prompt = `请将以下${source_lang}句子翻译成${target_lang}。\n要求：只返回翻译结果，不要有其他解释。\n\n原文：${text}\n\n翻译：`;
+  const prompt = [
+    '你是一个专业口语翻译引擎。',
+    `目标语言: ${target_lang}`,
+    `参考源语言(可能不准确): ${source_lang}`,
+    '',
+    '规则:',
+    '1) 优先按参考源语言理解；若原文明显不是该语种，请自动识别原文语种后再翻译。',
+    '2) 只输出最终译文，不要解释、不要加引号、不要加前后缀。',
+    '3) 保留数字、专有名词、时间、货币与单位。',
+    '4) 口语场景下可自然化表达，但不要改变原意。',
+    '5) 若原文已是目标语言，直接输出原文。',
+    '',
+    `原文: ${text}`,
+    '译文:'
+  ].join('\n');
 
   let url;
   let body;
@@ -609,10 +623,14 @@ rtasrWss.on('connection', async (clientWs, req) => {
   const uiConfig = { mode: 'dual_button', leftLang: 'zh', rightLang: 'en' };
   const isGuest = isGuestWsReq(req);
 
-  // OpenAI gpt-4o-transcribe fallback state
+  // OpenAI gpt-4o-transcribe pseudo-streaming state
   let asrProvider = 'qwen';
   let openaiAudioChunks = [];
   let openaiLanguageHint = null;
+  let openaiPartialInFlight = false;
+  let openaiLastPartialAt = 0;
+  let openaiLastPartialText = '';
+  let openaiItemId = `item_openai_${Math.random().toString(36).slice(2, 10)}`;
 
   if (!isGuest) {
     try {
@@ -651,25 +669,49 @@ rtasrWss.on('connection', async (clientWs, req) => {
       msg = JSON.parse(buf.toString('utf8'));
     } catch { return; }
 
-    // OpenAI gpt-4o-transcribe path (HTTP transcription, non-realtime upstream)
+    // OpenAI gpt-4o-transcribe path (pseudo-streaming via periodic partial transcription)
     if (asrProvider === 'openai') {
       if (msg?.type === 'input_audio_buffer.append' && msg.audio) {
         openaiAudioChunks.push(String(msg.audio));
+
+        const now = Date.now();
+        const partialIntervalMs = Number(process.env.OPENAI_PARTIAL_INTERVAL_MS || 1200);
+        const minChunksForPartial = Number(process.env.OPENAI_PARTIAL_MIN_CHUNKS || 8);
+
+        if (!openaiPartialInFlight && openaiAudioChunks.length >= minChunksForPartial && (now - openaiLastPartialAt) >= partialIntervalMs) {
+          openaiPartialInFlight = true;
+          openaiLastPartialAt = now;
+
+          const snapshotBuffers = openaiAudioChunks.map((b64) => Buffer.from(b64, 'base64'));
+          transcribeWithOpenAIFromPCM({
+            audioPcmChunks: snapshotBuffers,
+            languageHint: openaiLanguageHint || 'en'
+          })
+            .then((partialText) => {
+              const text = String(partialText || '').trim();
+              if (!text || text === openaiLastPartialText) return;
+              openaiLastPartialText = text;
+
+              clientWs.send(JSON.stringify({
+                type: 'conversation.item.input_audio_transcription.text',
+                item_id: openaiItemId,
+                content_index: 0,
+                text,
+                stash: '',
+                language: openaiLanguageHint || uiConfig.leftLang,
+                provider: 'openai'
+              }));
+            })
+            .catch(() => {})
+            .finally(() => {
+              openaiPartialInFlight = false;
+            });
+        }
         return;
       }
 
       if (msg?.type === 'input_audio_buffer.commit' || msg?.type === 'session.finish') {
         try {
-          const apiKey = process.env.OPENAI_API_KEY;
-          if (!apiKey) {
-            clientWs.send(JSON.stringify({
-              type: 'error',
-              error: { code: 'server_misconfigured', message: 'Missing env OPENAI_API_KEY' }
-            }));
-            clientWs.close(1011, 'server_misconfigured');
-            return;
-          }
-
           const audioBuffers = openaiAudioChunks.map((b64) => Buffer.from(b64, 'base64'));
           openaiAudioChunks = [];
 
@@ -681,6 +723,7 @@ rtasrWss.on('connection', async (clientWs, req) => {
 
           clientWs.send(JSON.stringify({
             type: 'conversation.item.input_audio_transcription.completed',
+            item_id: openaiItemId,
             transcript,
             language: openaiLanguageHint || uiConfig.leftLang,
             ui_side: side,
@@ -689,6 +732,9 @@ rtasrWss.on('connection', async (clientWs, req) => {
             ui_mode: uiConfig.mode,
             provider: 'openai'
           }));
+
+          openaiItemId = `item_openai_${Math.random().toString(36).slice(2, 10)}`;
+          openaiLastPartialText = '';
 
           clientWs.send(JSON.stringify({ type: 'session.finished' }));
           if (msg?.type === 'session.finish') {
@@ -734,6 +780,11 @@ rtasrWss.on('connection', async (clientWs, req) => {
         if (asrProvider === 'openai') {
           openaiAudioChunks = [];
           openaiLanguageHint = uiConfig.leftLang || 'en';
+          openaiPartialInFlight = false;
+          openaiLastPartialAt = 0;
+          openaiLastPartialText = '';
+          openaiItemId = `item_openai_${Math.random().toString(36).slice(2, 10)}`;
+
           clientWs.send(JSON.stringify({ type: 'session.ready', provider: 'openai' }));
           return;
         }
