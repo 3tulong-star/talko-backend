@@ -153,11 +153,61 @@ function resolveASRProvider({ requestedProvider, leftLang, rightLang }) {
   return String(pairMap[pair] || process.env.DEFAULT_ASR_PROVIDER || 'qwen').toLowerCase();
 }
 
+async function transcribeWithDeepgramFromPCM({ audioPcmChunks, languageHint, model }) {
+  const apiKey = process.env.DEEPGRAM_API_KEY;
+  if (!apiKey) throw new Error('missing_deepgram_api_key');
+
+  const joined = Buffer.concat(audioPcmChunks);
+  if (!joined.length) return '';
+
+  const wav = pcm16ToWavBuffer(joined, 16000, 1, 16);
+  const dgModel = model || process.env.DEEPGRAM_ASR_MODEL || 'nova-3';
+
+  const url = new URL(process.env.DEEPGRAM_ASR_URL || 'https://api.deepgram.com/v1/listen');
+  url.searchParams.set('model', dgModel);
+  if (languageHint) url.searchParams.set('language', languageHint);
+  url.searchParams.set('smart_format', 'true');
+
+  const resp = await fetch(url.toString(), {
+    method: 'POST',
+    headers: {
+      Authorization: `Token ${apiKey}`,
+      'Content-Type': 'audio/wav'
+    },
+    body: wav
+  });
+
+  if (!resp.ok) {
+    const detail = await resp.text().catch(() => '');
+    throw new Error(`deepgram_transcribe_failed_${resp.status}:${detail}`);
+  }
+
+  const data = await resp.json();
+  return String(data?.results?.channels?.[0]?.alternatives?.[0]?.transcript || '').trim();
+}
+
 function resolveTranslationProvider({ requestedProvider, sourceLang, targetLang }) {
   if (requestedProvider) return String(requestedProvider).toLowerCase();
   const pairMap = getJsonMapFromEnv('TRANSLATION_PROVIDER_MAP_JSON');
   const pair = getLangPairKey(sourceLang, targetLang);
   return String(pairMap[pair] || process.env.DEFAULT_TRANSLATION_PROVIDER || 'doubao').toLowerCase();
+}
+
+const QWEN_TTS_LANG_WHITELIST = new Set(['zh', 'en', 'es', 'ru', 'it', 'fr', 'ko', 'ja', 'de', 'pt']);
+
+function normalizeTtsLang(lang) {
+  const v = String(lang || '').toLowerCase();
+  if (v.startsWith('zh')) return 'zh';
+  if (v.startsWith('en')) return 'en';
+  if (v.startsWith('es')) return 'es';
+  if (v.startsWith('ru')) return 'ru';
+  if (v.startsWith('it')) return 'it';
+  if (v.startsWith('fr')) return 'fr';
+  if (v.startsWith('ko')) return 'ko';
+  if (v.startsWith('ja')) return 'ja';
+  if (v.startsWith('de')) return 'de';
+  if (v.startsWith('pt')) return 'pt';
+  return v;
 }
 
 function pcm16ToWav(pcmBuffer, sampleRate = 16000, channels = 1) {
@@ -241,9 +291,14 @@ async function synthesizeWithQwenTTS({ text, lang = 'en', voice = 'Cherry', mode
   const apiKey = process.env.DASHSCOPE_API_KEY;
   if (!apiKey) throw new Error('missing_dashscope_api_key');
 
+  const effectiveModel = model || process.env.QWEN_TTS_MODEL || 'qwen-tts';
+  if (effectiveModel.includes('realtime')) {
+    return await synthesizeWithQwenRealtimeTTS({ text, lang, voice, model: effectiveModel });
+  }
+
   const url = process.env.QWEN_TTS_URL || 'https://dashscope-intl.aliyuncs.com/compatible-mode/v1/audio/speech';
   const body = {
-    model: model || process.env.QWEN_TTS_MODEL || 'qwen-tts',
+    model: effectiveModel,
     voice,
     input: text,
     format: 'wav'
@@ -268,12 +323,84 @@ async function synthesizeWithQwenTTS({ text, lang = 'en', voice = 'Cherry', mode
     const json = await resp.json();
     const audioBase64 = json?.audio?.data || json?.output?.audio?.data || null;
     if (!audioBase64) throw new Error('qwen_tts_missing_audio_base64');
-    return { audioBase64, format: 'wav', provider: 'qwen', lang };
+    return { audioBase64, format: 'wav', provider: 'qwen', model: effectiveModel, lang };
   }
 
   const arrBuf = await resp.arrayBuffer();
   const b64 = Buffer.from(arrBuf).toString('base64');
-  return { audioBase64: b64, format: 'wav', provider: 'qwen', lang };
+  return { audioBase64: b64, format: 'wav', provider: 'qwen', model: effectiveModel, lang };
+}
+
+function synthesizeWithQwenRealtimeTTS({ text, lang = 'en', voice = 'Cherry', model = 'qwen3-tts-vc-realtime-2026-01-15' }) {
+  const apiKey = process.env.DASHSCOPE_API_KEY;
+  if (!apiKey) return Promise.reject(new Error('missing_dashscope_api_key'));
+
+  const wsBase = process.env.QWEN_TTS_REALTIME_WS_URL || 'wss://dashscope-intl.aliyuncs.com/api-ws/v1/realtime';
+  const wsUrl = `${wsBase}?model=${encodeURIComponent(model)}`;
+
+  return new Promise((resolve, reject) => {
+    const chunks = [];
+    let settled = false;
+    const ws = new WebSocket(wsUrl, { headers: { Authorization: `Bearer ${apiKey}` } });
+
+    const done = (err, payload) => {
+      if (settled) return;
+      settled = true;
+      try { ws.close(); } catch {}
+      if (err) reject(err);
+      else resolve(payload);
+    };
+
+    ws.on('open', () => {
+      ws.send(JSON.stringify({
+        event_id: `event_${Date.now()}`,
+        type: 'session.update',
+        session: {
+          mode: 'server_commit',
+          voice,
+          language_type: 'Auto',
+          response_format: 'pcm',
+          sample_rate: 24000
+        }
+      }));
+
+      ws.send(JSON.stringify({ type: 'input_text_buffer.append', text }));
+      ws.send(JSON.stringify({ type: 'session.finish' }));
+    });
+
+    ws.on('message', (raw) => {
+      try {
+        const msg = JSON.parse(raw.toString('utf8'));
+        if (msg.type === 'response.audio.delta' && msg.delta) {
+          chunks.push(Buffer.from(msg.delta, 'base64'));
+        } else if (msg.type === 'session.finished') {
+          const pcm = Buffer.concat(chunks);
+          if (!pcm.length) return done(new Error('qwen_tts_realtime_empty_audio'));
+          const wav = pcm16ToWavBuffer(pcm, 24000, 1, 16);
+          return done(null, {
+            audioBase64: wav.toString('base64'),
+            format: 'wav',
+            provider: 'qwen',
+            model,
+            lang,
+            voice
+          });
+        } else if (msg.type === 'error') {
+          const e = msg.error?.message || JSON.stringify(msg.error || msg);
+          return done(new Error(`qwen_tts_realtime_error:${e}`));
+        }
+      } catch {
+        // ignore non-json frame
+      }
+    });
+
+    ws.on('error', (e) => done(new Error(`qwen_tts_realtime_ws_error:${String(e?.message || e)}`)));
+    ws.on('close', () => {
+      if (!settled) done(new Error('qwen_tts_realtime_closed_early'));
+    });
+
+    setTimeout(() => done(new Error('qwen_tts_realtime_timeout')), Number(process.env.QWEN_TTS_REALTIME_TIMEOUT_MS || 20000));
+  });
 }
 
 function getWsTokenFromReq(req) {
@@ -485,8 +612,18 @@ app.post('/api/v1/tts', async (req, res) => {
     return jsonError(res, 400, 'Unsupported tts provider', { provider: selectedProvider });
   }
 
+  const normalizedLang = normalizeTtsLang(lang);
+  const effectiveModel = model || process.env.QWEN_TTS_MODEL || 'qwen-tts';
+  if (String(effectiveModel).includes('realtime') && !QWEN_TTS_LANG_WHITELIST.has(normalizedLang)) {
+    return jsonError(res, 400, 'Unsupported language for qwen realtime tts', {
+      lang,
+      normalized_lang: normalizedLang,
+      supported_langs: Array.from(QWEN_TTS_LANG_WHITELIST)
+    });
+  }
+
   try {
-    const result = await synthesizeWithQwenTTS({ text, lang, voice, model });
+    const result = await synthesizeWithQwenTTS({ text, lang: normalizedLang, voice, model: effectiveModel });
     res.json(result);
   } catch (e) {
     return jsonError(res, 500, 'TTS failed', { detail: String(e?.message || e) });
@@ -623,7 +760,7 @@ rtasrWss.on('connection', async (clientWs, req) => {
   const uiConfig = { mode: 'dual_button', leftLang: 'zh', rightLang: 'en' };
   const isGuest = isGuestWsReq(req);
 
-  // OpenAI gpt-4o-transcribe pseudo-streaming state
+  // OpenAI/Deepgram pseudo-streaming state
   let asrProvider = 'qwen';
   let openaiAudioChunks = [];
   let openaiLanguageHint = null;
@@ -631,6 +768,13 @@ rtasrWss.on('connection', async (clientWs, req) => {
   let openaiLastPartialAt = 0;
   let openaiLastPartialText = '';
   let openaiItemId = `item_openai_${Math.random().toString(36).slice(2, 10)}`;
+
+  let deepgramAudioChunks = [];
+  let deepgramLanguageHint = null;
+  let deepgramPartialInFlight = false;
+  let deepgramLastPartialAt = 0;
+  let deepgramLastPartialText = '';
+  let deepgramItemId = `item_deepgram_${Math.random().toString(36).slice(2, 10)}`;
 
   if (!isGuest) {
     try {
@@ -668,6 +812,99 @@ rtasrWss.on('connection', async (clientWs, req) => {
     try {
       msg = JSON.parse(buf.toString('utf8'));
     } catch { return; }
+
+    // Deepgram path (pseudo-streaming via periodic partial transcription)
+    if (asrProvider === 'deepgram') {
+      if (msg?.type === 'input_audio_buffer.append' && msg.audio) {
+        deepgramAudioChunks.push(String(msg.audio));
+
+        const now = Date.now();
+        const partialIntervalMs = Number(process.env.DEEPGRAM_PARTIAL_INTERVAL_MS || 900);
+        const minChunksForPartial = Number(process.env.DEEPGRAM_PARTIAL_MIN_CHUNKS || 6);
+
+        if (!deepgramPartialInFlight && deepgramAudioChunks.length >= minChunksForPartial && (now - deepgramLastPartialAt) >= partialIntervalMs) {
+          deepgramPartialInFlight = true;
+          deepgramLastPartialAt = now;
+
+          const snapshotBuffers = deepgramAudioChunks.map((b64) => Buffer.from(b64, 'base64'));
+          transcribeWithDeepgramFromPCM({
+            audioPcmChunks: snapshotBuffers,
+            languageHint: deepgramLanguageHint || 'en',
+            model: process.env.DEEPGRAM_ASR_MODEL || 'nova-3'
+          })
+            .then((partialText) => {
+              const text = String(partialText || '').trim();
+              if (!text || text === deepgramLastPartialText) return;
+              deepgramLastPartialText = text;
+
+              clientWs.send(JSON.stringify({
+                type: 'conversation.item.input_audio_transcription.text',
+                item_id: deepgramItemId,
+                content_index: 0,
+                text,
+                stash: '',
+                language: deepgramLanguageHint || uiConfig.leftLang,
+                provider: 'deepgram'
+              }));
+            })
+            .catch(() => {})
+            .finally(() => {
+              deepgramPartialInFlight = false;
+            });
+        }
+        return;
+      }
+
+      if (msg?.type === 'input_audio_buffer.commit' || msg?.type === 'session.finish') {
+        try {
+          const audioBuffers = deepgramAudioChunks.map((b64) => Buffer.from(b64, 'base64'));
+          deepgramAudioChunks = [];
+
+          const transcript = await transcribeWithDeepgramFromPCM({
+            audioPcmChunks: audioBuffers,
+            languageHint: deepgramLanguageHint || 'en',
+            model: process.env.DEEPGRAM_ASR_MODEL || 'nova-3'
+          });
+          const { side, fromLang, toLang } = decideSideAndDirection(uiConfig.leftLang, uiConfig.rightLang, deepgramLanguageHint || uiConfig.leftLang);
+
+          clientWs.send(JSON.stringify({
+            type: 'conversation.item.input_audio_transcription.completed',
+            item_id: deepgramItemId,
+            transcript,
+            language: deepgramLanguageHint || uiConfig.leftLang,
+            ui_side: side,
+            ui_source_lang: fromLang,
+            ui_target_lang: toLang,
+            ui_mode: uiConfig.mode,
+            provider: 'deepgram'
+          }));
+
+          deepgramItemId = `item_deepgram_${Math.random().toString(36).slice(2, 10)}`;
+          deepgramLastPartialText = '';
+
+          clientWs.send(JSON.stringify({ type: 'session.finished' }));
+          if (msg?.type === 'session.finish') {
+            clientWs.close();
+          }
+          return;
+        } catch (e) {
+          clientWs.send(JSON.stringify({
+            type: 'error',
+            error: { code: 'deepgram_asr_exception', message: String(e?.message || e) }
+          }));
+          clientWs.close(1011, 'deepgram_asr_exception');
+          return;
+        }
+      }
+
+      if (msg?.type === 'session.update') {
+        const s = msg.session || {};
+        if (s.left_lang || s.leftLang) uiConfig.leftLang = s.left_lang || s.leftLang;
+        if (s.right_lang || s.rightLang) uiConfig.rightLang = s.right_lang || s.rightLang;
+        deepgramLanguageHint = uiConfig.leftLang || 'en';
+      }
+      return;
+    }
 
     // OpenAI gpt-4o-transcribe path (pseudo-streaming via periodic partial transcription)
     if (asrProvider === 'openai') {
@@ -786,6 +1023,18 @@ rtasrWss.on('connection', async (clientWs, req) => {
           openaiItemId = `item_openai_${Math.random().toString(36).slice(2, 10)}`;
 
           clientWs.send(JSON.stringify({ type: 'session.ready', provider: 'openai' }));
+          return;
+        }
+
+        if (asrProvider === 'deepgram') {
+          deepgramAudioChunks = [];
+          deepgramLanguageHint = uiConfig.leftLang || 'en';
+          deepgramPartialInFlight = false;
+          deepgramLastPartialAt = 0;
+          deepgramLastPartialText = '';
+          deepgramItemId = `item_deepgram_${Math.random().toString(36).slice(2, 10)}`;
+
+          clientWs.send(JSON.stringify({ type: 'session.ready', provider: 'deepgram' }));
           return;
         }
 
