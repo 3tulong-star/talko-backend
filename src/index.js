@@ -328,44 +328,12 @@ async function synthesizeWithQwenTTS({ text, lang = 'en', voice = 'Cherry', mode
   const apiKey = process.env.DASHSCOPE_API_KEY;
   if (!apiKey) throw new Error('missing_dashscope_api_key');
 
-  const effectiveModel = model || process.env.QWEN_TTS_MODEL || 'qwen-tts';
-  if (effectiveModel.includes('realtime')) {
-    return await synthesizeWithQwenRealtimeTTS({ text, lang, voice, model: effectiveModel });
+  const effectiveModel = model || process.env.QWEN_TTS_MODEL || 'qwen3-tts-flash-realtime';
+  if (!String(effectiveModel).includes('realtime')) {
+    throw new Error(`qwen_tts_realtime_required:model=${effectiveModel}`);
   }
 
-  const url = process.env.QWEN_TTS_URL || 'https://dashscope-intl.aliyuncs.com/compatible-mode/v1/audio/speech';
-  const body = {
-    model: effectiveModel,
-    voice,
-    input: text,
-    format: 'wav'
-  };
-
-  const resp = await fetch(url, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      Authorization: `Bearer ${apiKey}`
-    },
-    body: JSON.stringify(body)
-  });
-
-  if (!resp.ok) {
-    const detail = await resp.text().catch(() => '');
-    throw new Error(`qwen_tts_failed_${resp.status}:${detail}`);
-  }
-
-  const contentType = resp.headers.get('content-type') || '';
-  if (contentType.includes('application/json')) {
-    const json = await resp.json();
-    const audioBase64 = json?.audio?.data || json?.output?.audio?.data || null;
-    if (!audioBase64) throw new Error('qwen_tts_missing_audio_base64');
-    return { audioBase64, format: 'wav', provider: 'qwen', model: effectiveModel, lang };
-  }
-
-  const arrBuf = await resp.arrayBuffer();
-  const b64 = Buffer.from(arrBuf).toString('base64');
-  return { audioBase64: b64, format: 'wav', provider: 'qwen', model: effectiveModel, lang };
+  return await synthesizeWithQwenRealtimeTTS({ text, lang, voice, model: effectiveModel });
 }
 
 function synthesizeWithQwenRealtimeTTS({ text, lang = 'en', voice = 'Cherry', model = 'qwen3-tts-vc-realtime-2026-01-15' }) {
@@ -374,6 +342,7 @@ function synthesizeWithQwenRealtimeTTS({ text, lang = 'en', voice = 'Cherry', mo
 
   const wsBase = process.env.QWEN_TTS_REALTIME_WS_URL || 'wss://dashscope-intl.aliyuncs.com/api-ws/v1/realtime';
   const wsUrl = `${wsBase}?model=${encodeURIComponent(model)}`;
+  console.log(`[TTS-RT] connect ws=${wsBase} model=${model} lang=${lang}`);
 
   return new Promise((resolve, reject) => {
     const chunks = [];
@@ -644,7 +613,7 @@ app.post('/api/v1/tts', async (req, res) => {
   const { text, lang = 'en', voice = 'Cherry', provider = 'qwen', model } = req.body || {};
   if (!text) return jsonError(res, 400, 'Missing required field: text');
 
-  console.log(`[TTS] request provider=${provider} model=${model || process.env.QWEN_TTS_MODEL || 'qwen-tts'} lang=${lang} text_len=${String(text).length}`);
+  console.log(`[TTS] request provider=${provider} model=${model || process.env.QWEN_TTS_MODEL || 'qwen3-tts-flash-realtime'} lang=${lang} text_len=${String(text).length}`);
 
   const selectedProvider = String(provider || 'qwen').toLowerCase();
   if (selectedProvider !== 'qwen') {
@@ -652,8 +621,11 @@ app.post('/api/v1/tts', async (req, res) => {
   }
 
   const normalizedLang = normalizeTtsLang(lang);
-  const effectiveModel = model || process.env.QWEN_TTS_MODEL || 'qwen-tts';
-  if (String(effectiveModel).includes('realtime') && !QWEN_TTS_LANG_WHITELIST.has(normalizedLang)) {
+  const effectiveModel = model || process.env.QWEN_TTS_MODEL || 'qwen3-tts-flash-realtime';
+  if (!String(effectiveModel).includes('realtime')) {
+    return jsonError(res, 400, 'Only qwen realtime tts models are supported now', { model: effectiveModel });
+  }
+  if (!QWEN_TTS_LANG_WHITELIST.has(normalizedLang)) {
     return jsonError(res, 400, 'Unsupported language for qwen realtime tts', {
       lang,
       normalized_lang: normalizedLang,
