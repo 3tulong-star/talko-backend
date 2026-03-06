@@ -153,6 +153,37 @@ function resolveASRProvider({ requestedProvider, leftLang, rightLang }) {
   return String(pairMap[pair] || process.env.DEFAULT_ASR_PROVIDER || 'qwen').toLowerCase();
 }
 
+function normalizeDeepgramLanguage(lang) {
+  const v = String(lang || '').trim().toLowerCase();
+  if (!v) return null;
+  if (v === 'zh' || v.startsWith('zh-')) return 'zh';
+  if (v === 'en' || v.startsWith('en-')) return 'en';
+  if (v === 'es' || v.startsWith('es-')) return 'es';
+  if (v === 'fr' || v.startsWith('fr-')) return 'fr';
+  if (v === 'de' || v.startsWith('de-')) return 'de';
+  if (v === 'hi' || v.startsWith('hi-')) return 'hi';
+  if (v === 'ru' || v.startsWith('ru-')) return 'ru';
+  if (v === 'pt' || v.startsWith('pt-')) return 'pt';
+  if (v === 'ja' || v.startsWith('ja-')) return 'ja';
+  if (v === 'it' || v.startsWith('it-')) return 'it';
+  if (v === 'nl' || v.startsWith('nl-')) return 'nl';
+  if (v === 'ko' || v.startsWith('ko-')) return 'ko';
+  return v;
+}
+
+function resolveDeepgramModel({ requestedModel, languageHint }) {
+  const language = normalizeDeepgramLanguage(languageHint);
+  if (requestedModel) return String(requestedModel);
+
+  const byLangMap = getJsonMapFromEnv('DEEPGRAM_MODEL_MAP_JSON');
+  if (language && byLangMap[language]) return String(byLangMap[language]);
+
+  // Nova-3 does not support zh; fallback to 2-general for Chinese.
+  if (language === 'zh') return process.env.DEEPGRAM_ZH_MODEL || '2-general';
+
+  return process.env.DEEPGRAM_ASR_MODEL || 'nova-3';
+}
+
 async function transcribeWithDeepgramFromPCM({ audioPcmChunks, languageHint, model }) {
   const apiKey = process.env.DEEPGRAM_API_KEY;
   if (!apiKey) throw new Error('missing_deepgram_api_key');
@@ -161,12 +192,16 @@ async function transcribeWithDeepgramFromPCM({ audioPcmChunks, languageHint, mod
   if (!joined.length) return '';
 
   const wav = pcm16ToWavBuffer(joined, 16000, 1, 16);
-  const dgModel = model || process.env.DEEPGRAM_ASR_MODEL || 'nova-3';
+  const normalizedLanguage = normalizeDeepgramLanguage(languageHint);
+  const dgModel = resolveDeepgramModel({ requestedModel: model, languageHint: normalizedLanguage });
 
   const url = new URL(process.env.DEEPGRAM_ASR_URL || 'https://api.deepgram.com/v1/listen');
   url.searchParams.set('model', dgModel);
-  if (languageHint) url.searchParams.set('language', languageHint);
+  if (normalizedLanguage) url.searchParams.set('language', normalizedLanguage);
   url.searchParams.set('smart_format', 'true');
+  url.searchParams.set('interim_results', 'true');
+  url.searchParams.set('punctuate', 'true');
+  url.searchParams.set('endpointing', String(process.env.DEEPGRAM_ENDPOINTING_MS || 300));
 
   const resp = await fetch(url.toString(), {
     method: 'POST',
@@ -183,7 +218,9 @@ async function transcribeWithDeepgramFromPCM({ audioPcmChunks, languageHint, mod
   }
 
   const data = await resp.json();
-  return String(data?.results?.channels?.[0]?.alternatives?.[0]?.transcript || '').trim();
+  const transcript = String(data?.results?.channels?.[0]?.alternatives?.[0]?.transcript || '').trim();
+  console.log(`[Deepgram] model=${dgModel} lang=${normalizedLanguage || 'auto'} chars=${transcript.length}`);
+  return transcript;
 }
 
 function resolveTranslationProvider({ requestedProvider, sourceLang, targetLang }) {
@@ -681,25 +718,39 @@ app.post('/api/v1/translate/text', async (req, res) => {
   } else if (selectedProvider === 'minimax') {
     const apiKey = process.env.MINIMAX_API_KEY;
     if (!apiKey) return jsonError(res, 500, 'Missing env MINIMAX_API_KEY');
-    const groupId = process.env.MINIMAX_GROUP_ID;
-    if (!groupId) return jsonError(res, 500, 'Missing env MINIMAX_GROUP_ID');
 
-    url = process.env.MINIMAX_TRANSLATE_URL || `https://api.minimax.chat/v1/text/chatcompletion_pro?GroupId=${groupId}`;
+    url = process.env.MINIMAX_TRANSLATE_URL || 'https://api.minimaxi.com/v1/text/chatcompletion_v2';
     body = {
-      model: model || process.env.MINIMAX_TRANSLATE_MODEL || 'MiniMax-Text-01',
-      bot_setting: [
-        {
-          bot_name: 'TalkoTranslator',
-          content: 'You are a professional translation engine. Only output translated text.'
-        }
-      ],
-      messages: [{ sender_type: 'USER', text: prompt }],
+      model: model || process.env.MINIMAX_TRANSLATE_MODEL || 'MiniMax-M2.5',
+      messages: [{ role: 'user', content: prompt }],
       temperature: 0.1,
       stream: !!stream
     };
     headers = {
       'Content-Type': 'application/json',
       Authorization: `Bearer ${apiKey}`
+    };
+  } else if (selectedProvider === 'gemini') {
+    const apiKey = process.env.GEMINI_API_KEY;
+    if (!apiKey) return jsonError(res, 500, 'Missing env GEMINI_API_KEY');
+
+    const geminiModel = model || process.env.GEMINI_TRANSLATE_MODEL || 'gemini-3.1-flash-lite';
+    if (stream) return jsonError(res, 400, 'Gemini translation streaming is not enabled yet');
+
+    url = process.env.GEMINI_TRANSLATE_URL || `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(geminiModel)}:generateContent`;
+    body = {
+      contents: [
+        {
+          parts: [{ text: prompt }]
+        }
+      ],
+      generationConfig: {
+        temperature: 0.1
+      }
+    };
+    headers = {
+      'Content-Type': 'application/json',
+      'x-goog-api-key': apiKey
     };
   } else {
     const apiKey = process.env.DOUBAO_API_KEY;
@@ -728,15 +779,32 @@ app.post('/api/v1/translate/text', async (req, res) => {
       signal: ac.signal
     });
 
-    if (!r.ok) return jsonError(res, 502, `Doubao error: ${r.status}`);
+    if (!r.ok) {
+      const detail = await r.text().catch(() => '');
+      return jsonError(res, 502, `${selectedProvider} error: ${r.status}`, { detail });
+    }
 
     if (!stream) {
       const data = await r.json();
       let translation = data?.choices?.[0]?.message?.content ?? '';
+
       if (selectedProvider === 'minimax') {
-        translation = data?.reply || data?.base_resp?.status_msg || translation || '';
+        translation = data?.choices?.[0]?.message?.content
+          || data?.reply
+          || data?.base_resp?.status_msg
+          || translation
+          || '';
+      } else if (selectedProvider === 'gemini') {
+        translation = data?.candidates?.[0]?.content?.parts?.map((p) => p?.text || '').join('')
+          || data?.candidates?.[0]?.content?.parts?.[0]?.text
+          || '';
       }
-      return res.json({ translation, provider: selectedProvider, timing: { total_ms: nowMs() - t0 } });
+
+      const usedModel = selectedProvider === 'gemini'
+        ? (model || process.env.GEMINI_TRANSLATE_MODEL || 'gemini-3.1-flash-lite')
+        : (body?.model || model || null);
+
+      return res.json({ translation, provider: selectedProvider, model: usedModel, timing: { total_ms: nowMs() - t0 } });
     }
 
     res.setHeader('Content-Type', 'text/event-stream; charset=utf-8');
@@ -780,12 +848,12 @@ rtasrWss.on('connection', async (clientWs, req) => {
   let openaiLastPartialText = '';
   let openaiItemId = `item_openai_${Math.random().toString(36).slice(2, 10)}`;
 
-  let deepgramAudioChunks = [];
+  let deepgramUpstream = null;
   let deepgramLanguageHint = null;
-  let deepgramPartialInFlight = false;
-  let deepgramLastPartialAt = 0;
-  let deepgramLastPartialText = '';
+  let deepgramModelHint = null;
   let deepgramItemId = `item_deepgram_${Math.random().toString(36).slice(2, 10)}`;
+  let deepgramClosing = false;
+  let pendingDeepgramFrames = [];
 
   if (!isGuest) {
     try {
@@ -824,88 +892,143 @@ rtasrWss.on('connection', async (clientWs, req) => {
       msg = JSON.parse(buf.toString('utf8'));
     } catch { return; }
 
-    // Deepgram path (pseudo-streaming via periodic partial transcription)
+    // Deepgram path (true realtime WS upstream)
     if (asrProvider === 'deepgram') {
-      if (msg?.type === 'input_audio_buffer.append' && msg.audio) {
-        deepgramAudioChunks.push(String(msg.audio));
+      if (!deepgramUpstream) {
+        if (msg?.type !== 'session.update') {
+          return;
+        }
 
-        const now = Date.now();
-        const partialIntervalMs = Number(process.env.DEEPGRAM_PARTIAL_INTERVAL_MS || 900);
-        const minChunksForPartial = Number(process.env.DEEPGRAM_PARTIAL_MIN_CHUNKS || 6);
+        const s = msg.session || {};
+        if (s.left_lang || s.leftLang) uiConfig.leftLang = s.left_lang || s.leftLang;
+        if (s.right_lang || s.rightLang) uiConfig.rightLang = s.right_lang || s.rightLang;
+        deepgramLanguageHint = uiConfig.leftLang || 'en';
+        deepgramModelHint = s.model || resolveDeepgramModel({ requestedModel: null, languageHint: deepgramLanguageHint });
 
-        if (!deepgramPartialInFlight && deepgramAudioChunks.length >= minChunksForPartial && (now - deepgramLastPartialAt) >= partialIntervalMs) {
-          deepgramPartialInFlight = true;
-          deepgramLastPartialAt = now;
+        const dgModel = resolveDeepgramModel({ requestedModel: deepgramModelHint, languageHint: deepgramLanguageHint });
+        const dgLang = normalizeDeepgramLanguage(deepgramLanguageHint) || 'en';
+        const dgBase = process.env.DEEPGRAM_WS_URL || 'wss://api.deepgram.com/v1/listen';
+        const dgUrl = new URL(dgBase);
+        dgUrl.searchParams.set('model', dgModel);
+        dgUrl.searchParams.set('language', dgLang);
+        dgUrl.searchParams.set('encoding', 'linear16');
+        dgUrl.searchParams.set('sample_rate', '16000');
+        dgUrl.searchParams.set('channels', '1');
+        dgUrl.searchParams.set('interim_results', 'true');
+        dgUrl.searchParams.set('punctuate', 'true');
+        dgUrl.searchParams.set('smart_format', 'true');
+        dgUrl.searchParams.set('endpointing', String(process.env.DEEPGRAM_ENDPOINTING_MS || 300));
 
-          const snapshotBuffers = deepgramAudioChunks.map((b64) => Buffer.from(b64, 'base64'));
-          transcribeWithDeepgramFromPCM({
-            audioPcmChunks: snapshotBuffers,
-            languageHint: deepgramLanguageHint || 'en',
-            model: process.env.DEEPGRAM_ASR_MODEL || 'nova-3'
-          })
-            .then((partialText) => {
-              const text = String(partialText || '').trim();
-              if (!text || text === deepgramLastPartialText) return;
-              deepgramLastPartialText = text;
+        const dgKey = process.env.DEEPGRAM_API_KEY;
+        if (!dgKey) {
+          clientWs.send(JSON.stringify({
+            type: 'error',
+            error: { code: 'server_misconfigured', message: 'Missing env DEEPGRAM_API_KEY' }
+          }));
+          clientWs.close(1011, 'server_misconfigured');
+          return;
+        }
 
+        deepgramClosing = false;
+        deepgramUpstream = new WebSocket(dgUrl.toString(), {
+          headers: { Authorization: `Token ${dgKey}` }
+        });
+
+        deepgramUpstream.on('open', () => {
+          clientWs.send(JSON.stringify({ type: 'session.ready', provider: 'deepgram' }));
+          for (const frame of pendingDeepgramFrames) {
+            try { deepgramUpstream.send(frame); } catch {}
+          }
+          pendingDeepgramFrames = [];
+        });
+
+        deepgramUpstream.on('message', (data) => {
+          try {
+            const parsed = JSON.parse(data.toString('utf8'));
+            const transcript = String(parsed?.channel?.alternatives?.[0]?.transcript || '').trim();
+            if (!transcript) return;
+
+            if (parsed.is_final) {
+              const { side, fromLang, toLang } = decideSideAndDirection(uiConfig.leftLang, uiConfig.rightLang, deepgramLanguageHint || uiConfig.leftLang);
+              clientWs.send(JSON.stringify({
+                type: 'conversation.item.input_audio_transcription.completed',
+                item_id: deepgramItemId,
+                transcript,
+                language: deepgramLanguageHint || uiConfig.leftLang,
+                ui_side: side,
+                ui_source_lang: fromLang,
+                ui_target_lang: toLang,
+                ui_mode: uiConfig.mode,
+                provider: 'deepgram',
+                model: dgModel
+              }));
+              deepgramItemId = `item_deepgram_${Math.random().toString(36).slice(2, 10)}`;
+            } else {
               clientWs.send(JSON.stringify({
                 type: 'conversation.item.input_audio_transcription.text',
                 item_id: deepgramItemId,
                 content_index: 0,
-                text,
+                text: transcript,
                 stash: '',
                 language: deepgramLanguageHint || uiConfig.leftLang,
-                provider: 'deepgram'
+                provider: 'deepgram',
+                model: dgModel
               }));
-            })
-            .catch(() => {})
-            .finally(() => {
-              deepgramPartialInFlight = false;
-            });
-        }
-        return;
-      }
-
-      if (msg?.type === 'input_audio_buffer.commit' || msg?.type === 'session.finish') {
-        try {
-          const audioBuffers = deepgramAudioChunks.map((b64) => Buffer.from(b64, 'base64'));
-          deepgramAudioChunks = [];
-
-          const transcript = await transcribeWithDeepgramFromPCM({
-            audioPcmChunks: audioBuffers,
-            languageHint: deepgramLanguageHint || 'en',
-            model: process.env.DEEPGRAM_ASR_MODEL || 'nova-3'
-          });
-          const { side, fromLang, toLang } = decideSideAndDirection(uiConfig.leftLang, uiConfig.rightLang, deepgramLanguageHint || uiConfig.leftLang);
-
-          clientWs.send(JSON.stringify({
-            type: 'conversation.item.input_audio_transcription.completed',
-            item_id: deepgramItemId,
-            transcript,
-            language: deepgramLanguageHint || uiConfig.leftLang,
-            ui_side: side,
-            ui_source_lang: fromLang,
-            ui_target_lang: toLang,
-            ui_mode: uiConfig.mode,
-            provider: 'deepgram'
-          }));
-
-          deepgramItemId = `item_deepgram_${Math.random().toString(36).slice(2, 10)}`;
-          deepgramLastPartialText = '';
-
-          clientWs.send(JSON.stringify({ type: 'session.finished' }));
-          if (msg?.type === 'session.finish') {
-            clientWs.close();
+            }
+          } catch {
+            // ignore parse errors
           }
-          return;
-        } catch (e) {
+        });
+
+        deepgramUpstream.on('error', (e) => {
           clientWs.send(JSON.stringify({
             type: 'error',
             error: { code: 'deepgram_asr_exception', message: String(e?.message || e) }
           }));
           clientWs.close(1011, 'deepgram_asr_exception');
-          return;
-        }
+        });
+
+        deepgramUpstream.on('close', () => {
+          deepgramUpstream = null;
+          if (!deepgramClosing && clientWs.readyState === WebSocket.OPEN) {
+            clientWs.send(JSON.stringify({ type: 'session.finished' }));
+          }
+        });
+
+        return;
+      }
+
+      if (msg?.type === 'input_audio_buffer.append' && msg.audio) {
+        try {
+          const pcm = Buffer.from(String(msg.audio), 'base64');
+          if (deepgramUpstream.readyState === WebSocket.OPEN) {
+            deepgramUpstream.send(pcm);
+          } else if (deepgramUpstream.readyState === WebSocket.CONNECTING) {
+            pendingDeepgramFrames.push(pcm);
+          }
+        } catch {}
+        return;
+      }
+
+      if (msg?.type === 'input_audio_buffer.commit') {
+        // Deepgram finalizes by endpointing/silence; no explicit commit frame required.
+        return;
+      }
+
+      if (msg?.type === 'session.finish') {
+        deepgramClosing = true;
+        try {
+          if (deepgramUpstream.readyState === WebSocket.OPEN) {
+            deepgramUpstream.send(JSON.stringify({ type: 'Finalize' }));
+          }
+        } catch {}
+        try {
+          deepgramUpstream?.close();
+        } catch {}
+        deepgramUpstream = null;
+        clientWs.send(JSON.stringify({ type: 'session.finished' }));
+        clientWs.close();
+        return;
       }
 
       if (msg?.type === 'session.update') {
@@ -1038,14 +1161,96 @@ rtasrWss.on('connection', async (clientWs, req) => {
         }
 
         if (asrProvider === 'deepgram') {
-          deepgramAudioChunks = [];
           deepgramLanguageHint = uiConfig.leftLang || 'en';
-          deepgramPartialInFlight = false;
-          deepgramLastPartialAt = 0;
-          deepgramLastPartialText = '';
+          deepgramModelHint = s.model || resolveDeepgramModel({ requestedModel: null, languageHint: deepgramLanguageHint });
           deepgramItemId = `item_deepgram_${Math.random().toString(36).slice(2, 10)}`;
+          pendingDeepgramFrames = [];
+          deepgramClosing = false;
 
-          clientWs.send(JSON.stringify({ type: 'session.ready', provider: 'deepgram' }));
+          const dgModel = resolveDeepgramModel({ requestedModel: deepgramModelHint, languageHint: deepgramLanguageHint });
+          const dgLang = normalizeDeepgramLanguage(deepgramLanguageHint) || 'en';
+          const dgBase = process.env.DEEPGRAM_WS_URL || 'wss://api.deepgram.com/v1/listen';
+          const dgUrl = new URL(dgBase);
+          dgUrl.searchParams.set('model', dgModel);
+          dgUrl.searchParams.set('language', dgLang);
+          dgUrl.searchParams.set('encoding', 'linear16');
+          dgUrl.searchParams.set('sample_rate', '16000');
+          dgUrl.searchParams.set('channels', '1');
+          dgUrl.searchParams.set('interim_results', 'true');
+          dgUrl.searchParams.set('punctuate', 'true');
+          dgUrl.searchParams.set('smart_format', 'true');
+          dgUrl.searchParams.set('endpointing', String(process.env.DEEPGRAM_ENDPOINTING_MS || 300));
+
+          const dgKey = process.env.DEEPGRAM_API_KEY;
+          if (!dgKey) {
+            clientWs.send(JSON.stringify({
+              type: 'error',
+              error: { code: 'server_misconfigured', message: 'Missing env DEEPGRAM_API_KEY' }
+            }));
+            clientWs.close(1011, 'server_misconfigured');
+            return;
+          }
+
+          deepgramUpstream = new WebSocket(dgUrl.toString(), {
+            headers: { Authorization: `Token ${dgKey}` }
+          });
+
+          deepgramUpstream.on('open', () => {
+            clientWs.send(JSON.stringify({ type: 'session.ready', provider: 'deepgram' }));
+            for (const frame of pendingDeepgramFrames) {
+              try { deepgramUpstream.send(frame); } catch {}
+            }
+            pendingDeepgramFrames = [];
+          });
+
+          deepgramUpstream.on('message', (data) => {
+            try {
+              const parsed = JSON.parse(data.toString('utf8'));
+              const transcript = String(parsed?.channel?.alternatives?.[0]?.transcript || '').trim();
+              if (!transcript) return;
+
+              if (parsed.is_final) {
+                const { side, fromLang, toLang } = decideSideAndDirection(uiConfig.leftLang, uiConfig.rightLang, deepgramLanguageHint || uiConfig.leftLang);
+                clientWs.send(JSON.stringify({
+                  type: 'conversation.item.input_audio_transcription.completed',
+                  item_id: deepgramItemId,
+                  transcript,
+                  language: deepgramLanguageHint || uiConfig.leftLang,
+                  ui_side: side,
+                  ui_source_lang: fromLang,
+                  ui_target_lang: toLang,
+                  ui_mode: uiConfig.mode,
+                  provider: 'deepgram',
+                  model: dgModel
+                }));
+                deepgramItemId = `item_deepgram_${Math.random().toString(36).slice(2, 10)}`;
+              } else {
+                clientWs.send(JSON.stringify({
+                  type: 'conversation.item.input_audio_transcription.text',
+                  item_id: deepgramItemId,
+                  content_index: 0,
+                  text: transcript,
+                  stash: '',
+                  language: deepgramLanguageHint || uiConfig.leftLang,
+                  provider: 'deepgram',
+                  model: dgModel
+                }));
+              }
+            } catch {}
+          });
+
+          deepgramUpstream.on('error', (e) => {
+            clientWs.send(JSON.stringify({
+              type: 'error',
+              error: { code: 'deepgram_asr_exception', message: String(e?.message || e) }
+            }));
+            clientWs.close(1011, 'deepgram_asr_exception');
+          });
+
+          deepgramUpstream.on('close', () => {
+            deepgramUpstream = null;
+          });
+
           return;
         }
 
