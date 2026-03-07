@@ -409,6 +409,68 @@ function synthesizeWithQwenRealtimeTTS({ text, lang = 'en', voice = 'Cherry', mo
   });
 }
 
+function streamQwenRealtimeTTS({ text, lang = 'en', voice = 'Cherry', model = 'qwen3-tts-flash-realtime', onChunk, onDone, onError }) {
+  const apiKey = process.env.DASHSCOPE_API_KEY;
+  if (!apiKey) {
+    onError?.(new Error('missing_dashscope_api_key'));
+    return () => {};
+  }
+
+  const wsBase = process.env.QWEN_TTS_REALTIME_WS_URL || 'wss://dashscope-intl.aliyuncs.com/api-ws/v1/realtime';
+  const wsUrl = `${wsBase}?model=${encodeURIComponent(model)}`;
+  const ws = new WebSocket(wsUrl, { headers: { Authorization: `Bearer ${apiKey}` } });
+  let closed = false;
+
+  const finish = (fn, arg) => {
+    if (closed) return;
+    closed = true;
+    try { ws.close(); } catch {}
+    fn?.(arg);
+  };
+
+  ws.on('open', () => {
+    ws.send(JSON.stringify({
+      event_id: `event_${Date.now()}`,
+      type: 'session.update',
+      session: {
+        mode: 'server_commit',
+        voice,
+        language_type: 'Auto',
+        response_format: 'pcm',
+        sample_rate: 24000
+      }
+    }));
+    ws.send(JSON.stringify({ type: 'input_text_buffer.append', text }));
+    ws.send(JSON.stringify({ type: 'session.finish' }));
+  });
+
+  ws.on('message', (raw) => {
+    try {
+      const msg = JSON.parse(raw.toString('utf8'));
+      if (msg.type === 'response.audio.delta' && msg.delta) {
+        onChunk?.(msg.delta);
+      } else if (msg.type === 'session.finished') {
+        finish(onDone);
+      } else if (msg.type === 'error') {
+        const detail = msg.error?.message || JSON.stringify(msg.error || msg);
+        finish(onError, new Error(`qwen_tts_realtime_error:${detail}`));
+      }
+    } catch {
+      // ignore non-json frame
+    }
+  });
+
+  ws.on('error', (e) => finish(onError, new Error(`qwen_tts_realtime_ws_error:${String(e?.message || e)}`)));
+  ws.on('close', () => finish(onError, new Error('qwen_tts_realtime_closed_early')));
+
+  const timeout = setTimeout(() => finish(onError, new Error('qwen_tts_realtime_timeout')), Number(process.env.QWEN_TTS_REALTIME_TIMEOUT_MS || 20000));
+
+  return () => {
+    clearTimeout(timeout);
+    finish();
+  };
+}
+
 function getWsTokenFromReq(req) {
   try {
     const u = new URL(req.url, `http://${req.headers.host || 'localhost'}`);
@@ -610,7 +672,7 @@ app.get('/api/v1/history/conversations/:conversationId/messages', authMiddleware
 
 // --- Original Translate & ASR APIs ---
 app.post('/api/v1/tts', async (req, res) => {
-  const { text, lang = 'en', voice = 'Cherry', provider = 'qwen', model } = req.body || {};
+  const { text, lang = 'en', voice = 'Cherry', provider = 'qwen', model, stream = false } = req.body || {};
   if (!text) return jsonError(res, 400, 'Missing required field: text');
 
   console.log(`[TTS] request provider=${provider} model=${model || process.env.QWEN_TTS_MODEL || 'qwen3-tts-flash-realtime'} lang=${lang} text_len=${String(text).length}`);
@@ -635,6 +697,38 @@ app.post('/api/v1/tts', async (req, res) => {
 
   try {
     const t0 = nowMs();
+
+    if (stream) {
+      res.setHeader('Content-Type', 'application/x-ndjson; charset=utf-8');
+      res.setHeader('Cache-Control', 'no-cache');
+      res.setHeader('Connection', 'keep-alive');
+
+      const stop = streamQwenRealtimeTTS({
+        text,
+        lang: normalizedLang,
+        voice,
+        model: effectiveModel,
+        onChunk: (delta) => {
+          res.write(JSON.stringify({ type: 'audio.delta', delta }) + '\n');
+        },
+        onDone: () => {
+          res.write(JSON.stringify({ type: 'done' }) + '\n');
+          res.end();
+          console.log(`[TTS] stream success provider=qwen model=${effectiveModel} lang=${normalizedLang} ms=${nowMs() - t0}`);
+        },
+        onError: (e) => {
+          res.write(JSON.stringify({ type: 'error', detail: String(e?.message || e) }) + '\n');
+          res.end();
+          console.error(`[TTS] stream failed provider=qwen model=${effectiveModel} lang=${normalizedLang} err=${String(e?.message || e)}`);
+        }
+      });
+
+      req.on('close', () => {
+        try { stop?.(); } catch {}
+      });
+      return;
+    }
+
     const result = await synthesizeWithQwenTTS({ text, lang: normalizedLang, voice, model: effectiveModel });
     console.log(`[TTS] success provider=${result?.provider || 'qwen'} model=${result?.model || effectiveModel} lang=${normalizedLang} ms=${nowMs() - t0}`);
     res.json(result);
@@ -824,6 +918,7 @@ rtasrWss.on('connection', async (clientWs, req) => {
   let deepgramLanguageHint = null;
   let deepgramModelHint = null;
   let deepgramItemId = `item_deepgram_${Math.random().toString(36).slice(2, 10)}`;
+  let deepgramLastInterimText = '';
   let deepgramClosing = false;
   let pendingDeepgramFrames = [];
 
@@ -887,9 +982,11 @@ rtasrWss.on('connection', async (clientWs, req) => {
         dgUrl.searchParams.set('sample_rate', '16000');
         dgUrl.searchParams.set('channels', '1');
         dgUrl.searchParams.set('interim_results', 'true');
+        dgUrl.searchParams.set('vad_events', 'true');
         dgUrl.searchParams.set('punctuate', 'true');
         dgUrl.searchParams.set('smart_format', 'true');
         dgUrl.searchParams.set('endpointing', String(process.env.DEEPGRAM_ENDPOINTING_MS || 300));
+        dgUrl.searchParams.set('utterance_end_ms', String(process.env.DEEPGRAM_UTTERANCE_END_MS || 1000));
 
         const dgKey = process.env.DEEPGRAM_API_KEY;
         if (!dgKey) {
@@ -917,10 +1014,34 @@ rtasrWss.on('connection', async (clientWs, req) => {
         deepgramUpstream.on('message', (data) => {
           try {
             const parsed = JSON.parse(data.toString('utf8'));
+
+            if (parsed?.type === 'UtteranceEnd') {
+              if (deepgramLastInterimText) {
+                const { side, fromLang, toLang } = decideSideAndDirection(uiConfig.leftLang, uiConfig.rightLang, deepgramLanguageHint || uiConfig.leftLang);
+                clientWs.send(JSON.stringify({
+                  type: 'conversation.item.input_audio_transcription.completed',
+                  item_id: deepgramItemId,
+                  transcript: deepgramLastInterimText,
+                  language: deepgramLanguageHint || uiConfig.leftLang,
+                  ui_side: side,
+                  ui_source_lang: fromLang,
+                  ui_target_lang: toLang,
+                  ui_mode: uiConfig.mode,
+                  provider: 'deepgram',
+                  model: dgModel
+                }));
+                deepgramItemId = `item_deepgram_${Math.random().toString(36).slice(2, 10)}`;
+                deepgramLastInterimText = '';
+              }
+              return;
+            }
+
             const transcript = String(parsed?.channel?.alternatives?.[0]?.transcript || '').trim();
             if (!transcript) return;
 
-            if (parsed.is_final) {
+            const isFinal = !!parsed.is_final;
+            const speechFinal = !!parsed.speech_final;
+            if (isFinal) {
               const { side, fromLang, toLang } = decideSideAndDirection(uiConfig.leftLang, uiConfig.rightLang, deepgramLanguageHint || uiConfig.leftLang);
               clientWs.send(JSON.stringify({
                 type: 'conversation.item.input_audio_transcription.completed',
@@ -935,7 +1056,9 @@ rtasrWss.on('connection', async (clientWs, req) => {
                 model: dgModel
               }));
               deepgramItemId = `item_deepgram_${Math.random().toString(36).slice(2, 10)}`;
+              deepgramLastInterimText = '';
             } else {
+              deepgramLastInterimText = transcript;
               clientWs.send(JSON.stringify({
                 type: 'conversation.item.input_audio_transcription.text',
                 item_id: deepgramItemId,
@@ -944,7 +1067,8 @@ rtasrWss.on('connection', async (clientWs, req) => {
                 stash: '',
                 language: deepgramLanguageHint || uiConfig.leftLang,
                 provider: 'deepgram',
-                model: dgModel
+                model: dgModel,
+                speech_final: speechFinal
               }));
             }
           } catch {
@@ -1136,6 +1260,7 @@ rtasrWss.on('connection', async (clientWs, req) => {
           deepgramLanguageHint = uiConfig.leftLang || 'en';
           deepgramModelHint = s.model || resolveDeepgramModel({ requestedModel: null, languageHint: deepgramLanguageHint });
           deepgramItemId = `item_deepgram_${Math.random().toString(36).slice(2, 10)}`;
+          deepgramLastInterimText = '';
           pendingDeepgramFrames = [];
           deepgramClosing = false;
 
