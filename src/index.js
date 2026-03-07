@@ -1274,9 +1274,11 @@ rtasrWss.on('connection', async (clientWs, req) => {
           dgUrl.searchParams.set('sample_rate', '16000');
           dgUrl.searchParams.set('channels', '1');
           dgUrl.searchParams.set('interim_results', 'true');
+          dgUrl.searchParams.set('vad_events', 'true');
           dgUrl.searchParams.set('punctuate', 'true');
           dgUrl.searchParams.set('smart_format', 'true');
           dgUrl.searchParams.set('endpointing', String(process.env.DEEPGRAM_ENDPOINTING_MS || 300));
+          dgUrl.searchParams.set('utterance_end_ms', String(process.env.DEEPGRAM_UTTERANCE_END_MS || 1000));
 
           const dgKey = process.env.DEEPGRAM_API_KEY;
           if (!dgKey) {
