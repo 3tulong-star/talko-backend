@@ -700,8 +700,11 @@ app.post('/api/v1/tts', async (req, res) => {
 
     if (stream) {
       res.setHeader('Content-Type', 'application/x-ndjson; charset=utf-8');
-      res.setHeader('Cache-Control', 'no-cache');
+      res.setHeader('Cache-Control', 'no-cache, no-transform');
       res.setHeader('Connection', 'keep-alive');
+      res.setHeader('X-Accel-Buffering', 'no');
+      if (typeof res.flushHeaders === 'function') res.flushHeaders();
+      res.write(JSON.stringify({ type: 'start', provider: 'qwen', model: effectiveModel }) + '\n');
 
       const stop = streamQwenRealtimeTTS({
         text,
@@ -723,7 +726,8 @@ app.post('/api/v1/tts', async (req, res) => {
         }
       });
 
-      req.on('close', () => {
+      // Don't listen on req.close here: request body finishes quickly and would cancel stream early.
+      res.on('close', () => {
         try { stop?.(); } catch {}
       });
       return;
@@ -1274,11 +1278,9 @@ rtasrWss.on('connection', async (clientWs, req) => {
           dgUrl.searchParams.set('sample_rate', '16000');
           dgUrl.searchParams.set('channels', '1');
           dgUrl.searchParams.set('interim_results', 'true');
-          dgUrl.searchParams.set('vad_events', 'true');
           dgUrl.searchParams.set('punctuate', 'true');
           dgUrl.searchParams.set('smart_format', 'true');
           dgUrl.searchParams.set('endpointing', String(process.env.DEEPGRAM_ENDPOINTING_MS || 300));
-          dgUrl.searchParams.set('utterance_end_ms', String(process.env.DEEPGRAM_UTTERANCE_END_MS || 1000));
 
           const dgKey = process.env.DEEPGRAM_API_KEY;
           if (!dgKey) {
