@@ -755,19 +755,19 @@ app.post('/api/v1/translate/text', async (req, res) => {
   });
 
   const prompt = [
-    '你是一个专业口语翻译引擎。',
-    `目标语言: ${target_lang}`,
-    `参考源语言(可能不准确): ${source_lang}`,
+    'You are a professional spoken-language translation engine.',
+    `Target language: ${target_lang}`,
+    `Reference source language (may be inaccurate): ${source_lang}`,
     '',
-    '规则:',
-    '1) 优先按参考源语言理解；若原文明显不是该语种，请自动识别原文语种后再翻译。',
-    '2) 只输出最终译文，不要解释、不要加引号、不要加前后缀。',
-    '3) 保留数字、专有名词、时间、货币与单位。',
-    '4) 口语场景下可自然化表达，但不要改变原意。',
-    '5) 若原文已是目标语言，直接输出原文。',
+    'Rules:',
+    '1) Prioritize understanding via the reference source language; if the input is clearly in another language, auto-detect first, then translate.',
+    '2) Output only the final translation. No explanations, no quotes, no prefixes/suffixes.',
+    '3) Preserve numbers, proper nouns, time, currency, and units.',
+    '4) Naturalize for spoken conversation when helpful, but do not change meaning.',
+    '5) If the input is already in the target language, output it unchanged.',
     '',
-    `原文: ${text}`,
-    '译文:'
+    `Source text: ${text}`,
+    'Translation:'
   ].join('\n');
 
   let url;
@@ -800,6 +800,24 @@ app.post('/api/v1/translate/text', async (req, res) => {
       'Content-Type': 'application/json',
       Authorization: `Bearer ${apiKey}`
     };
+  } else if (selectedProvider === 'google_basic') {
+    const apiKey = process.env.GOOGLE_TRANSLATE_API_KEY;
+    if (!apiKey) return jsonError(res, 500, 'Missing env GOOGLE_TRANSLATE_API_KEY');
+    if (stream) return jsonError(res, 400, 'Google Translation Basic streaming is not enabled');
+
+    url = process.env.GOOGLE_TRANSLATE_URL || 'https://translation.googleapis.com/language/translate/v2';
+    body = {
+      q: text,
+      source: source_lang,
+      target: target_lang,
+      format: 'text'
+    };
+    headers = {
+      'Content-Type': 'application/json; charset=utf-8'
+    };
+
+    const sep = url.includes('?') ? '&' : '?';
+    url = `${url}${sep}key=${encodeURIComponent(apiKey)}`;
   } else if (selectedProvider === 'gemini') {
     const apiKey = process.env.GEMINI_API_KEY;
     if (!apiKey) return jsonError(res, 500, 'Missing env GEMINI_API_KEY');
@@ -868,11 +886,17 @@ app.post('/api/v1/translate/text', async (req, res) => {
         translation = data?.candidates?.[0]?.content?.parts?.map((p) => p?.text || '').join('')
           || data?.candidates?.[0]?.content?.parts?.[0]?.text
           || '';
+      } else if (selectedProvider === 'google_basic') {
+        translation = data?.data?.translations?.[0]?.translatedText
+          || data?.translations?.[0]?.translatedText
+          || '';
       }
 
       const usedModel = selectedProvider === 'gemini'
         ? (model || process.env.GEMINI_TRANSLATE_MODEL || 'gemini-3.1-flash-lite')
-        : (body?.model || model || null);
+        : (selectedProvider === 'google_basic'
+          ? 'google-translate-v2-basic'
+          : (body?.model || model || null));
 
       return res.json({ translation, provider: selectedProvider, model: usedModel, timing: { total_ms: nowMs() - t0 } });
     }
