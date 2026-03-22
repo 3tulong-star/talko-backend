@@ -856,23 +856,33 @@ app.post('/api/v1/translate/text', async (req, res) => {
   }
 
   const t0 = nowMs();
+  const traceId = `tr_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
   const ac = new AbortController();
   const to = setTimeout(() => ac.abort(new Error('timeout')), 30000);
 
+  console.log(`[Translate][trace] id=${traceId} in provider=${selectedProvider} source=${source_lang} target=${target_lang} chars=${String(text).length} stream=${!!stream}`);
+
   try {
+    const upstreamStartMs = nowMs();
     const r = await fetch(url, {
       method: 'POST',
       headers,
       body: JSON.stringify(body),
       signal: ac.signal
     });
+    const upstreamTtfbMs = nowMs() - upstreamStartMs;
 
     if (!r.ok) {
       const detail = await r.text().catch(() => '');
+      const backendTotalMs = nowMs() - t0;
+      console.error(`[Translate][trace] id=${traceId} upstream_error provider=${selectedProvider} status=${r.status} upstream_ttfb_ms=${upstreamTtfbMs} backend_total_ms=${backendTotalMs}`);
+      res.setHeader('X-Trace-Id', traceId);
+      res.setHeader('X-Provider', selectedProvider);
       return jsonError(res, 502, `${selectedProvider} error: ${r.status}`, { detail });
     }
 
     if (!stream) {
+      const decodeStartMs = nowMs();
       const data = await r.json();
       let translation = data?.choices?.[0]?.message?.content ?? '';
 
@@ -898,9 +908,34 @@ app.post('/api/v1/translate/text', async (req, res) => {
           ? 'google-translate-v2-basic'
           : (body?.model || model || null));
 
-      return res.json({ translation, provider: selectedProvider, model: usedModel, timing: { total_ms: nowMs() - t0 } });
+      const decodeMs = nowMs() - decodeStartMs;
+      const backendTotalMs = nowMs() - t0;
+      console.log(`[Translate][trace] id=${traceId} done provider=${selectedProvider} model=${usedModel || 'unknown'} upstream_ttfb_ms=${upstreamTtfbMs} decode_ms=${decodeMs} backend_total_ms=${backendTotalMs}`);
+
+      res.setHeader('X-Trace-Id', traceId);
+      res.setHeader('X-Provider', selectedProvider);
+      if (usedModel) {
+        res.setHeader('X-Model', String(usedModel));
+      }
+      res.setHeader('X-Upstream-Latency-Ms', String(upstreamTtfbMs));
+      res.setHeader('X-Backend-Latency-Ms', String(backendTotalMs));
+
+      return res.json({
+        translation,
+        provider: selectedProvider,
+        model: usedModel,
+        trace_id: traceId,
+        timing: {
+          upstream_ttfb_ms: upstreamTtfbMs,
+          decode_ms: decodeMs,
+          backend_total_ms: backendTotalMs
+        }
+      });
     }
 
+    res.setHeader('X-Trace-Id', traceId);
+    res.setHeader('X-Provider', selectedProvider);
+    res.setHeader('X-Upstream-Latency-Ms', String(upstreamTtfbMs));
     res.setHeader('Content-Type', 'text/event-stream; charset=utf-8');
     const reader = r.body.getReader();
     const decoder = new TextDecoder('utf-8');
@@ -909,8 +944,12 @@ app.post('/api/v1/translate/text', async (req, res) => {
       if (done) break;
       res.write(decoder.decode(value, { stream: true }));
     }
+    const backendTotalMs = nowMs() - t0;
+    console.log(`[Translate][trace] id=${traceId} stream_done provider=${selectedProvider} upstream_ttfb_ms=${upstreamTtfbMs} backend_total_ms=${backendTotalMs}`);
     res.end();
   } catch (e) {
+    const backendTotalMs = nowMs() - t0;
+    console.error(`[Translate][trace] id=${traceId} failed provider=${selectedProvider} backend_total_ms=${backendTotalMs} err=${String(e?.message || e)}`);
     return jsonError(res, 500, `Translate failed: ${String(e?.message || e)}`);
   } finally {
     clearTimeout(to);
@@ -1406,6 +1445,13 @@ rtasrWss.on('connection', async (clientWs, req) => {
         upstream.on('message', (data) => {
           try {
             const parsed = JSON.parse(data.toString('utf8'));
+            if (parsed.type === 'conversation.item.input_audio_transcription.text') {
+              const { side, fromLang, toLang } = decideSideAndDirection(uiConfig.leftLang, uiConfig.rightLang, parsed.language);
+              parsed.ui_side = side;
+              parsed.ui_source_lang = fromLang;
+              parsed.ui_target_lang = toLang;
+              parsed.ui_mode = uiConfig.mode;
+            }
             if (parsed.type === 'conversation.item.input_audio_transcription.completed') {
               const { side, fromLang, toLang } = decideSideAndDirection(uiConfig.leftLang, uiConfig.rightLang, parsed.language);
               parsed.ui_side = side;
