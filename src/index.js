@@ -840,6 +840,27 @@ app.post('/api/v1/translate/text', async (req, res) => {
       'Content-Type': 'application/json',
       'x-goog-api-key': apiKey
     };
+  } else if (selectedProvider === 'qwen') {
+    const apiKey = process.env.DASHSCOPE_API_KEY;
+    if (!apiKey) return jsonError(res, 500, 'Missing env DASHSCOPE_API_KEY');
+
+    const qwenModel = model || process.env.QWEN_TRANSLATE_MODEL || 'qwen3.5-flash';
+    url = process.env.QWEN_TRANSLATE_URL || 'https://dashscope-intl.aliyuncs.com/compatible-mode/v1/chat/completions';
+    body = {
+      model: qwenModel,
+      stream: !!stream,
+      top_p: 0.8,
+      temperature: 0.7,
+      enable_search: false,
+      enable_thinking: false,
+      thinking_budget: 4000,
+      result_format: 'message',
+      messages: [{ role: 'user', content: prompt }]
+    };
+    headers = {
+      'Content-Type': 'application/json',
+      Authorization: `Bearer ${apiKey}`
+    };
   } else {
     const apiKey = process.env.DOUBAO_API_KEY;
     if (!apiKey) return jsonError(res, 500, 'Missing env DOUBAO_API_KEY');
@@ -896,6 +917,11 @@ app.post('/api/v1/translate/text', async (req, res) => {
         translation = data?.candidates?.[0]?.content?.parts?.map((p) => p?.text || '').join('')
           || data?.candidates?.[0]?.content?.parts?.[0]?.text
           || '';
+      } else if (selectedProvider === 'qwen') {
+        translation = data?.choices?.[0]?.message?.content
+          || data?.output?.choices?.[0]?.message?.content
+          || data?.output_text
+          || '';
       } else if (selectedProvider === 'google_basic') {
         translation = data?.data?.translations?.[0]?.translatedText
           || data?.translations?.[0]?.translatedText
@@ -904,9 +930,11 @@ app.post('/api/v1/translate/text', async (req, res) => {
 
       const usedModel = selectedProvider === 'gemini'
         ? (model || process.env.GEMINI_TRANSLATE_MODEL || 'gemini-3.1-flash-lite')
-        : (selectedProvider === 'google_basic'
-          ? 'google-translate-v2-basic'
-          : (body?.model || model || null));
+        : (selectedProvider === 'qwen'
+          ? (model || process.env.QWEN_TRANSLATE_MODEL || 'qwen3.5-flash')
+          : (selectedProvider === 'google_basic'
+            ? 'google-translate-v2-basic'
+            : (body?.model || model || null)));
 
       const decodeMs = nowMs() - decodeStartMs;
       const backendTotalMs = nowMs() - t0;
