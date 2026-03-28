@@ -6,6 +6,7 @@ import path from 'path';
 import { fileURLToPath } from 'url';
 import { WebSocketServer, WebSocket } from 'ws';
 import admin from 'firebase-admin';
+import textToSpeech from '@google-cloud/text-to-speech';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -39,6 +40,30 @@ async function initFirebaseAdmin() {
 }
 
 const fbInitPromise = initFirebaseAdmin();
+
+function buildGoogleClientOptionsFromEnv() {
+  const json = process.env.GOOGLE_SERVICE_ACCOUNT_JSON || process.env.GOOGLE_CREDENTIALS_JSON;
+  if (!json) return {};
+
+  try {
+    const creds = JSON.parse(json);
+    if (!creds?.client_email || !creds?.private_key) {
+      throw new Error('missing client_email/private_key');
+    }
+    return {
+      credentials: {
+        client_email: creds.client_email,
+        private_key: String(creds.private_key).replace(/\\n/g, '\n')
+      },
+      projectId: creds.project_id || process.env.GOOGLE_CLOUD_PROJECT || undefined
+    };
+  } catch (e) {
+    console.error(`[GoogleTTS] invalid credentials JSON in env: ${String(e?.message || e)}`);
+    return {};
+  }
+}
+
+const googleTtsClient = new textToSpeech.TextToSpeechClient(buildGoogleClientOptionsFromEnv());
 
 const app = express();
 const upload = multer({ storage: multer.memoryStorage() });
@@ -471,6 +496,76 @@ function streamQwenRealtimeTTS({ text, lang = 'en', voice = 'Cherry', model = 'q
   };
 }
 
+const GOOGLE_TTS_LANGUAGE_FALLBACK = {
+  zh: 'cmn-CN',
+  en: 'en-US',
+  es: 'es-ES',
+  ru: 'ru-RU',
+  it: 'it-IT',
+  fr: 'fr-FR',
+  ko: 'ko-KR',
+  ja: 'ja-JP',
+  de: 'de-DE',
+  pt: 'pt-PT',
+  ar: 'ar-XA',
+  hi: 'hi-IN',
+  id: 'id-ID',
+  th: 'th-TH',
+  tr: 'tr-TR',
+  uk: 'uk-UA',
+  vi: 'vi-VN',
+  cs: 'cs-CZ',
+  da: 'da-DK',
+  fil: 'fil-PH',
+  fi: 'fi-FI',
+  is: 'is-IS',
+  ms: 'ms-MY',
+  no: 'nb-NO',
+  pl: 'pl-PL',
+  sv: 'sv-SE'
+};
+
+function normalizeGoogleTtsLanguage(lang) {
+  const v = String(lang || '').toLowerCase();
+  if (!v) return 'en-US';
+  if (v.includes('-')) return v;
+  return GOOGLE_TTS_LANGUAGE_FALLBACK[v] || 'en-US';
+}
+
+async function synthesizeWithGoogleTTS({ text, lang = 'en', model }) {
+  const voiceName = model || process.env.GOOGLE_TTS_VOICE_NAME || '';
+  const languageCode = normalizeGoogleTtsLanguage(lang);
+
+  const [response] = await googleTtsClient.synthesizeSpeech({
+    input: { text },
+    voice: {
+      languageCode,
+      ...(voiceName ? { name: voiceName } : {})
+    },
+    audioConfig: {
+      audioEncoding: 'MP3'
+    }
+  });
+
+  const audioContent = response?.audioContent;
+  if (!audioContent || !audioContent.length) {
+    throw new Error('google_tts_empty_audio');
+  }
+
+  const audioBase64 = Buffer.isBuffer(audioContent)
+    ? audioContent.toString('base64')
+    : Buffer.from(audioContent, 'binary').toString('base64');
+
+  return {
+    audioBase64,
+    format: 'mp3',
+    provider: 'google_tts',
+    model: voiceName || 'google-wavenet-auto',
+    lang: languageCode,
+    voice: voiceName || null
+  };
+}
+
 function getWsTokenFromReq(req) {
   try {
     const u = new URL(req.url, `http://${req.headers.host || 'localhost'}`);
@@ -675,28 +770,37 @@ app.post('/api/v1/tts', async (req, res) => {
   const { text, lang = 'en', voice = 'Cherry', provider = 'qwen', model, stream = false } = req.body || {};
   if (!text) return jsonError(res, 400, 'Missing required field: text');
 
-  console.log(`[TTS] request provider=${provider} model=${model || process.env.QWEN_TTS_MODEL || 'qwen3-tts-flash-realtime'} lang=${lang} text_len=${String(text).length}`);
-
   const selectedProvider = String(provider || 'qwen').toLowerCase();
-  if (selectedProvider !== 'qwen') {
-    return jsonError(res, 400, 'Unsupported tts provider', { provider: selectedProvider });
-  }
-
-  const normalizedLang = normalizeTtsLang(lang);
-  const effectiveModel = model || process.env.QWEN_TTS_MODEL || 'qwen3-tts-flash-realtime';
-  if (!String(effectiveModel).includes('realtime')) {
-    return jsonError(res, 400, 'Only qwen realtime tts models are supported now', { model: effectiveModel });
-  }
-  if (!QWEN_TTS_LANG_WHITELIST.has(normalizedLang)) {
-    return jsonError(res, 400, 'Unsupported language for qwen realtime tts', {
-      lang,
-      normalized_lang: normalizedLang,
-      supported_langs: Array.from(QWEN_TTS_LANG_WHITELIST)
-    });
-  }
+  console.log(`[TTS] request provider=${selectedProvider} model=${model || '-'} lang=${lang} text_len=${String(text).length} stream=${!!stream}`);
 
   try {
     const t0 = nowMs();
+
+    if (selectedProvider === 'google_tts') {
+      if (stream) {
+        return jsonError(res, 400, 'google_tts does not support stream mode');
+      }
+      const result = await synthesizeWithGoogleTTS({ text, lang, model });
+      console.log(`[TTS] success provider=${result.provider} model=${result.model || '-'} lang=${result.lang} ms=${nowMs() - t0}`);
+      return res.json(result);
+    }
+
+    if (selectedProvider !== 'qwen') {
+      return jsonError(res, 400, 'Unsupported tts provider', { provider: selectedProvider });
+    }
+
+    const normalizedLang = normalizeTtsLang(lang);
+    const effectiveModel = model || process.env.QWEN_TTS_MODEL || 'qwen3-tts-flash-realtime';
+    if (!String(effectiveModel).includes('realtime')) {
+      return jsonError(res, 400, 'Only qwen realtime tts models are supported now', { model: effectiveModel });
+    }
+    if (!QWEN_TTS_LANG_WHITELIST.has(normalizedLang)) {
+      return jsonError(res, 400, 'Unsupported language for qwen realtime tts', {
+        lang,
+        normalized_lang: normalizedLang,
+        supported_langs: Array.from(QWEN_TTS_LANG_WHITELIST)
+      });
+    }
 
     if (stream) {
       res.setHeader('Content-Type', 'application/x-ndjson; charset=utf-8');
@@ -737,7 +841,7 @@ app.post('/api/v1/tts', async (req, res) => {
     console.log(`[TTS] success provider=${result?.provider || 'qwen'} model=${result?.model || effectiveModel} lang=${normalizedLang} ms=${nowMs() - t0}`);
     res.json(result);
   } catch (e) {
-    console.error(`[TTS] failed provider=qwen model=${effectiveModel} lang=${normalizedLang} err=${String(e?.message || e)}`);
+    console.error(`[TTS] failed provider=${selectedProvider} model=${model || '-'} lang=${lang} err=${String(e?.message || e)}`);
     return jsonError(res, 500, 'TTS failed', { detail: String(e?.message || e) });
   }
 });
