@@ -639,6 +639,46 @@ async function addUserUsage(uid, secondsToAdd) {
   });
 }
 
+async function deleteDocumentTree(docRef) {
+  const subcollections = await docRef.listCollections();
+  let deletedDocuments = 0;
+
+  for (const subcollection of subcollections) {
+    deletedDocuments += await deleteCollectionTree(subcollection);
+  }
+
+  await docRef.delete();
+  return deletedDocuments + 1;
+}
+
+async function deleteCollectionTree(collectionRef, pageSize = 100) {
+  let deletedDocuments = 0;
+
+  while (true) {
+    const snap = await collectionRef.limit(pageSize).get();
+    if (snap.empty) break;
+
+    for (const doc of snap.docs) {
+      deletedDocuments += await deleteDocumentTree(doc.ref);
+    }
+  }
+
+  return deletedDocuments;
+}
+
+async function deleteUserAccountData(uid) {
+  const db = admin.firestore();
+  const userRef = db.collection('users').doc(uid);
+  const userSnap = await userRef.get();
+
+  if (!userSnap.exists) {
+    return { deletedDocuments: 0, existed: false };
+  }
+
+  const deletedDocuments = await deleteDocumentTree(userRef);
+  return { deletedDocuments, existed: true };
+}
+
 app.get('/health', async (req, res) => {
   const init = await fbInitPromise;
   res.json({ ok: true, firebase_admin: init.ok ? 'ready' : 'not_ready' });
@@ -657,6 +697,21 @@ app.get('/api/v1/usage/me', authMiddleware, async (req, res) => {
     res.json({ uid, ...usage });
   } catch (e) {
     return jsonError(res, 500, 'Failed to read usage', { detail: String(e?.message || e) });
+  }
+});
+
+app.delete('/api/v1/account/me', authMiddleware, async (req, res) => {
+  try {
+    const uid = req.user.uid;
+    const result = await deleteUserAccountData(uid);
+    res.json({
+      ok: true,
+      uid,
+      deletedDocuments: result.deletedDocuments,
+      existed: result.existed
+    });
+  } catch (e) {
+    return jsonError(res, 500, 'Failed to delete account data', { detail: String(e?.message || e) });
   }
 });
 
